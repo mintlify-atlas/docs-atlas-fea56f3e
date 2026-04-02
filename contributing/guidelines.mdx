@@ -1,0 +1,70 @@
+---
+title: "Contributing Guidelines"
+description: "How to contribute to the NVIDIA Open GPU Kernel Modules project."
+keywords: ["contributing", "pull request", "CLA", "code style", "open source"]
+---
+
+Thank you for your interest in contributing to the NVIDIA Open GPU Kernel Modules project. We welcome contributions from the community and will respond via GitHub.
+
+## How the repository works
+
+This codebase is shared with NVIDIA's proprietary drivers, and various processing is performed on the shared code to produce the source published here. This has several implications for contributors:
+
+- The GitHub repository functions mostly as a snapshot of each driver release.
+- Individual revision history for changes made to NVIDIA's shared codebase may not be available — there will likely be only one git commit per driver release.
+- Individual contributions may not be reflected as separate git commits in the GitHub repository.
+- Because the code undergoes processing before being published, contributions require **manual merging** into the shared codebase.
+- Large refactoring changes may be difficult to merge and accept back into the shared codebase. If you have large refactoring to suggest, please contact NVIDIA in advance to coordinate.
+
+<Warning>
+  **Non-functional (cosmetic) changes are not accepted.** This includes typo fixes
+  in comments, language adjustments, whitespace changes, and similar non-executable
+  modifications. Changes going into this codebase incur significant overhead, so
+  the focus is on functional code improvements. If you are unsure whether your
+  change qualifies, ask on the [discussion boards](https://github.com/NVIDIA/open-gpu-kernel-modules/discussions).
+</Warning>
+
+## Code style
+
+NVIDIA does not currently publish a formal code style guide, as many different components come together in this project. Read the existing code in the repository — especially the code surrounding your proposed change — to get a feel for the conventions used.
+
+NVIDIA will guide contributors through any necessary style changes during code review of your pull request.
+
+## How to contribute
+
+<Steps>
+  <Step title="Fork the repository">
+    Fork the repository on GitHub at [github.com/NVIDIA/open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules).
+  </Step>
+  <Step title="Create a branch">
+    Create a dedicated branch for your change to keep your work organized and isolated.
+  </Step>
+  <Step title="Make your changes">
+    Implement your functional improvement. Ensure your change is a meaningful code contribution rather than a cosmetic adjustment.
+  </Step>
+  <Step title="Submit a pull request">
+    Open a pull request against the repository at [github.com/NVIDIA/open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules). NVIDIA will respond via GitHub.
+  </Step>
+  <Step title="Accept the Contributor License Agreement">
+    When prompted, accept the Contributor License Agreement (CLA). This is required before your pull request can be merged.
+  </Step>
+</Steps>
+
+## Getting help and asking questions
+
+Have a question before opening a pull request? Use the discussion boards:
+
+[github.com/NVIDIA/open-gpu-kernel-modules/discussions](https://github.com/NVIDIA/open-gpu-kernel-modules/discussions)
+
+## Reporting issues
+
+Problems specific to the Open GPU Kernel Modules can be reported in the Issues section of the repository:
+
+[github.com/NVIDIA/open-gpu-kernel-modules/issues](https://github.com/NVIDIA/open-gpu-kernel-modules/issues)
+
+Additional bug reporting venues are also available:
+
+- **NVIDIA developer forums:** [forums.developer.nvidia.com/c/gpu-graphics/linux/148](https://forums.developer.nvidia.com/c/gpu-graphics/linux/148)
+- **Email:** [linux-bugs@nvidia.com](mailto:linux-bugs@nvidia.com)
+
+For security vulnerabilities, do not use the public issue tracker. See the [Security](/contributing/security) page for the correct reporting process.

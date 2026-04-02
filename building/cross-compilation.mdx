@@ -1,0 +1,85 @@
+---
+title: "Cross-Compilation"
+description: "Build the NVIDIA open GPU kernel modules for a different target architecture using a cross-compilation toolchain."
+---
+
+The NVIDIA open GPU kernel modules support cross-compilation, allowing you to build modules for a target architecture different from the host machine. This is useful for embedded and server deployments where build infrastructure runs on x86_64 but the target system uses a different CPU.
+
+## Supported Target Architectures
+
+| Architecture | `TARGET_ARCH` value |
+|---|---|
+| x86-64 (AMD64) | `x86_64` |
+| ARM 64-bit | `aarch64` |
+
+## Prerequisites
+
+To cross-compile, you need a cross-compilation toolchain installed for your target architecture. On Debian/Ubuntu-based systems:
+
+```bash
+# For aarch64 (ARM 64-bit) target
+sudo apt-get install gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu g++-aarch64-linux-gnu
+```
+
+You also need kernel headers or source for the **target** kernel, not the host kernel.
+
+## Cross-Compilation Examples
+
+<Tabs>
+  <Tab title="aarch64 (from x86_64)">
+    To compile on an x86\_64 host for an aarch64 target:
+
+    ```bash
+    make modules -j$(nproc)         \
+        TARGET_ARCH=aarch64         \
+        CC=aarch64-linux-gnu-gcc    \
+        LD=aarch64-linux-gnu-ld     \
+        AR=aarch64-linux-gnu-ar     \
+        CXX=aarch64-linux-gnu-g++   \
+        OBJCOPY=aarch64-linux-gnu-objcopy
+    ```
+  </Tab>
+  <Tab title="x86_64 (native)">
+    To build natively for x86\_64 (or explicitly specify the architecture):
+
+    ```bash
+    make modules -j$(nproc) \
+        TARGET_ARCH=x86_64
+    ```
+
+    When `TARGET_ARCH` is not set, it defaults to the host architecture, so this flag is only required when cross-compiling or when you want to make the target explicit.
+  </Tab>
+</Tabs>
+
+## Toolchain Variable Reference
+
+All toolchain variables are passed on the `make` command line alongside `TARGET_ARCH`:
+
+| Variable | Description | Example (aarch64) |
+|---|---|---|
+| `TARGET_ARCH` | Target CPU architecture | `aarch64` |
+| `CC` | C compiler | `aarch64-linux-gnu-gcc` |
+| `LD` | Linker | `aarch64-linux-gnu-ld` |
+| `AR` | Archiver | `aarch64-linux-gnu-ar` |
+| `CXX` | C++ compiler | `aarch64-linux-gnu-g++` |
+| `OBJCOPY` | Object copy utility | `aarch64-linux-gnu-objcopy` |
+
+## Specifying the Kernel Source
+
+When cross-compiling, the kernel source and output trees for the **target** kernel must be pointed to explicitly using the `SYSSRC` and `SYSOUT` variables:
+
+```bash
+make modules -j$(nproc)                         \
+    TARGET_ARCH=aarch64                         \
+    CC=aarch64-linux-gnu-gcc                    \
+    LD=aarch64-linux-gnu-ld                     \
+    AR=aarch64-linux-gnu-ar                     \
+    CXX=aarch64-linux-gnu-g++                   \
+    OBJCOPY=aarch64-linux-gnu-objcopy           \
+    SYSSRC=/path/to/target/kernel/source        \
+    SYSOUT=/path/to/target/kernel/build
+```
+
+<Note>
+The kernel interface layer of each module must be built with the toolchain that was used to build the target kernel — not just any cross-compiler. If the target kernel was built with a specific GCC version or Clang, use the same compiler here. The build system will attempt to read `CONFIG_CC_VERSION_TEXT` from the kernel configuration to detect this automatically, but when cross-compiling you should verify the toolchain matches.
+</Note>

@@ -1,0 +1,113 @@
+---
+title: "nvidia.ko — Core Driver"
+description: "The main NVIDIA GPU kernel module: manages GPU hardware, PCIe, memory, power, and exposes the Resource Manager interface."
+---
+
+`nvidia.ko` is the foundation of the NVIDIA Linux driver stack. It initialises each GPU at PCIe probe time, owns the register BAR mappings, handles interrupts, and exposes the NVIDIA Resource Manager (RM) interface used by every other module and by user-space through `/dev/nvidia*`.
+
+## Role and responsibilities
+
+- **Hardware initialisation** — PCIe device probe, BAR mapping, interrupt setup (MSI/MSI-X)
+- **Resource Manager (RM)** — OS-agnostic firmware-level GPU management layer
+- **Memory management** — GPU framebuffer allocation, DMA, IOMMU/SMMU integration, mmap
+- **Power management** — runtime PM, suspend/resume, dynamic frequency scaling
+- **P2P (peer-to-peer)** — NVIDIA GPUDirect peer memory registration
+- **Character devices** — creates `/dev/nvidia<N>` (per GPU) and `/dev/nvidiactl` (control node)
+
+## Two-component architecture
+
+`nvidia.ko` is built from two components that are linked together at build time:
+
+<Tabs>
+  <Tab title="OS-agnostic component">
+    The OS-agnostic component (`nv-kernel.o_binary`) contains the bulk of the Resource Manager logic. It is independent of the Linux kernel version and is therefore pre-compiled.
+
+    - Source lives in `src/nvidia/` and `src/common/`
+    - Provided as `nv-kernel.o_binary` in the NVIDIA `.run` installation package
+    - When building from this repository, it is compiled from the full source tree
+
+    <Note>
+      When installing via the `.run` package without building from source, the pre-compiled `nv-kernel.o_binary` is used. Only the kernel interface layer (below) needs to be compiled against the running kernel.
+    </Note>
+  </Tab>
+  <Tab title="Kernel interface layer">
+    The kernel interface layer adapts the OS-agnostic RM to the Linux kernel APIs available in the target kernel version.
+
+    - Source lives in `kernel-open/nvidia/`
+    - Must be compiled against the target kernel headers
+    - Calls into the OS-agnostic component via a stable internal API
+  </Tab>
+</Tabs>
+
+## Key source files
+
+The kernel interface layer (`kernel-open/nvidia/`) contains the following important files:
+
+| File | Purpose |
+|---|---|
+| `nv.c` | Module entry point; `init_module` / `cleanup_module`, device file operations |
+| `nv-pci.c` | PCIe probe and remove callbacks, BAR setup |
+| `nv-mmap.c` | `mmap(2)` handler for mapping GPU memory into user space |
+| `nv-dma.c` | DMA buffer allocation and IOMMU/SMMU integration |
+| `nv-p2p.c` | GPUDirect peer-to-peer memory registration and callbacks |
+| `nv-dmabuf.c` | DMA-BUF exporter for sharing GPU buffers with other kernel drivers |
+| `nv-msi.c` | MSI/MSI-X interrupt setup |
+| `os-interface.c` | OS abstraction functions called by the OS-agnostic component |
+| `nv-procfs.c` | `/proc/driver/nvidia` entries |
+| `nv-reg.h` | Module parameter (registry key) definitions |
+| `nv_uvm_interface.c` | Interface between `nvidia.ko` and `nvidia-uvm.ko` |
+| `nv-modeset-interface.c` | Interface between `nvidia.ko` and `nvidia-modeset.ko` |
+
+## Character devices
+
+| Device node | Purpose |
+|---|---|
+| `/dev/nvidia0`, `/dev/nvidia1`, … | Per-GPU device node (one per installed GPU) |
+| `/dev/nvidiactl` | Global control node; used for RM API calls not tied to a single GPU |
+
+User-space libraries (the CUDA driver, OpenGL ICD, etc.) communicate with the RM exclusively through `ioctl(2)` calls on these device nodes.
+
+## Loading and unloading
+
+```bash
+# Load the core driver
+modprobe nvidia
+
+# Unload (all dependent modules must be unloaded first)
+modprobe -r nvidia
+```
+
+<Warning>
+Unloading `nvidia.ko` while `nvidia-modeset.ko`, `nvidia-drm.ko`, or `nvidia-uvm.ko` are loaded will fail. Unload dependent modules first, or use `modprobe -r nvidia-drm nvidia-modeset nvidia-uvm nvidia`.
+</Warning>
+
+## Module parameters
+
+Module parameters are exposed via the `NVreg_` prefix. They can be set at load time or persisted in `/etc/modprobe.d/`. Some notable parameters from `nv-reg.h`:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `NVreg_ModifyDeviceFiles` | `1` | Allow the driver to create/modify `/dev/nvidia*` device files |
+| `NVreg_DeviceFileUID` | `0` | UID assigned to created device files |
+| `NVreg_DeviceFileGID` | `0` | GID assigned to created device files |
+| `NVreg_DeviceFileMode` | `0666` | File mode (permissions) for created device files |
+| `NVreg_EnableMSI` | `1` | Use MSI interrupts instead of wired PCI interrupts |
+| `NVreg_InitializeSystemMemoryAllocations` | `1` | Zero-fill system memory on allocation (security) |
+| `NVreg_EnableStreamMemOPs` | `0` | Enable CUDA stream memory operations |
+| `NVreg_RegistryDwords` | — | Semicolon-separated `key=value` pairs passed to the RM |
+| `NVreg_ExcludedGpus` | — | Comma-separated GPU UUIDs to exclude from driver attachment |
+
+```bash
+# Example: set parameters at load time
+modprobe nvidia NVreg_EnableMSI=1 NVreg_DeviceFileMode=0660
+```
+
+## Inspecting the loaded module
+
+```bash
+# Show version, parameters, and dependencies
+modinfo nvidia
+
+# Check which GPUs are attached
+cat /proc/driver/nvidia/gpus/*/information
+```

@@ -1,0 +1,135 @@
+---
+title: "nvidia-modeset.ko — Display Engine"
+description: "The NVIDIA Kernel Mode Setting module (NVKMS): owns the display hardware pipeline, managing scanout, display configuration, EDID, and HDR."
+---
+
+`nvidia-modeset.ko` implements the NVIDIA Kernel Mode Setting engine, internally known as **NVKMS**. It owns and drives NVIDIA's display hardware pipeline — everything from reading EDID data from a monitor to configuring pixel formats, refresh rates, HDR metadata, and sending scanout commands to the display engine.
+
+It sits between `nvidia-drm.ko` (which provides the Linux DRM/KMS abstraction) and `nvidia.ko` (which owns the underlying GPU hardware).
+
+## Role and responsibilities
+
+- **Display hardware control** — programs the GPU's display engine registers via the RM
+- **Mode enumeration and validation** — queries monitor capabilities (EDID) and validates mode requests
+- **Scanout configuration** — sets up pixel format, colour space, HDR metadata, dithering
+- **Display topology** — manages head-to-connector routing, MST (Multi-Stream Transport) hubs
+- **Backlight control** — exposes brightness control for laptop internal panels
+- **Suspend/resume** — saves and restores display state across system sleep
+
+## Two-component architecture
+
+Like `nvidia.ko`, `nvidia-modeset.ko` is built from two components:
+
+<Tabs>
+  <Tab title="OS-agnostic component">
+    The OS-agnostic component (`nv-modeset-kernel.o_binary`) contains the full NVKMS display engine logic. It is OS-independent and therefore pre-compiled in the NVIDIA installation package.
+
+    - Source lives in `src/nvidia-modeset/`
+    - Provided as `nv-modeset-kernel.o_binary` in the NVIDIA `.run` package
+    - When building from this open-source repository, it is compiled from source
+
+    <Note>
+      `nv-modeset-kernel.o_binary` is large and time-consuming to compile. Pre-built binaries are provided in the `.run` installer so users do not need to rebuild it on every driver installation.
+    </Note>
+  </Tab>
+  <Tab title="Kernel interface layer">
+    The kernel interface layer adapts the OS-agnostic NVKMS engine to Linux kernel APIs.
+
+    - Source lives in `kernel-open/nvidia-modeset/` (only a handful of files)
+    - Must be compiled against the target kernel headers
+    - Provides the Linux character device, proc filesystem entries, and OS callback implementations
+  </Tab>
+</Tabs>
+
+## Source files
+
+### Kernel interface layer (`kernel-open/nvidia-modeset/`)
+
+| File | Purpose |
+|---|---|
+| `nvidia-modeset-linux.c` | Module entry/exit, character device (`/dev/nvidia-modeset`), OS callbacks |
+| `nvidia-modeset-os-interface.h` | OS abstraction types used between the two components |
+| `nvkms.h` | Core NVKMS API: `nvKmsIoctl`, `nvKmsOpen`, `nvKmsClose`, suspend/resume hooks |
+| `nvkms-ioctl.h` | `NVKMS_IOCTL_IOWR` ioctl definition; `NvKmsIoctlParams` structure |
+| `nv-kthread-q.c` | Kernel thread queue used for deferred work |
+
+### NVKMS kernel API (`nvkms.h`)
+
+The `nvkms.h` header defines the internal API surface between the kernel interface layer and the OS-agnostic component:
+
+```c
+// Open/close an NVKMS file descriptor context
+void *nvKmsOpen(NvU32 pid, enum NvKmsClientType clientType,
+                nvkms_per_open_handle_t *pOpenKernel);
+void  nvKmsClose(void *pOpenVoid);
+
+// Dispatch an NVKMS ioctl command
+NvBool nvKmsIoctl(void *pOpenVoid, NvU32 cmd,
+                  NvU64 paramsAddress, const size_t paramSize);
+
+// Module lifecycle
+NvBool nvKmsModuleLoad(void);
+void   nvKmsModuleUnload(void);
+
+// GPU power events
+void nvKmsSuspend(NvU32 gpuId);
+void nvKmsResume(NvU32 gpuId);
+```
+
+The NVKMS kernel API (`nvkms-kapi.h`, included via `nvkms.h`) also provides a structured function table used by `nvidia-drm.ko` to issue display commands without going through the character device ioctl path.
+
+## NVKMS ioctl interface
+
+User-space tools and `nvidia-drm.ko` communicate with NVKMS through a single multiplexed ioctl on `/dev/nvidia-modeset`. The `NvKmsIoctlParams` structure carries the real command, size, and a pointer to the parameter block:
+
+```c
+// From kernel-open/nvidia-modeset/nvkms-ioctl.h
+struct NvKmsIoctlParams {
+    NvU32 cmd;            // NVKMS command number
+    NvU32 size;           // size of the parameter struct at `address`
+    NvU64 address;        // user-space pointer to command parameters
+};
+
+#define NVKMS_IOCTL_IOWR \
+    _IOWR(NVKMS_IOCTL_MAGIC, NVKMS_IOCTL_CMD, struct NvKmsIoctlParams)
+```
+
+## Relationship with nvidia-drm.ko
+
+`nvidia-modeset.ko` and `nvidia-drm.ko` together form the complete Linux display stack for NVIDIA GPUs:
+
+```
+nvidia-drm.ko        nvidia-modeset.ko
+─────────────        ─────────────────
+DRM/KMS objects  ──► NVKMS display engine ──► nvidia.ko ──► GPU display hardware
+(CRTC, encoder,      (mode validation,
+ connector, FB)       scanout, EDID, HDR)
+```
+
+`nvidia-drm.ko` translates DRM atomic state changes into NVKMS API calls, delegating all display hardware programming to `nvidia-modeset.ko`.
+
+## Loading and dependencies
+
+`nvidia-modeset.ko` depends on `nvidia.ko`.
+
+```bash
+# Load (automatically loads nvidia.ko first)
+modprobe nvidia-modeset
+
+# Unload
+modprobe -r nvidia-modeset
+```
+
+<Warning>
+`nvidia-modeset.ko` cannot be unloaded while `nvidia-drm.ko` is loaded. Always unload `nvidia-drm` first.
+</Warning>
+
+## Verifying the module
+
+```bash
+# Check that the character device exists
+ls -la /dev/nvidia-modeset
+
+# View module info
+modinfo nvidia-modeset
+```

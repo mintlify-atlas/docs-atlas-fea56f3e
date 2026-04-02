@@ -1,0 +1,219 @@
+---
+title: "GPUDirect Peer Memory"
+description: "How the nvidia-peermem kernel module enables RDMA NICs and other third-party devices to access GPU memory directly via the GPUDirect peer memory interface."
+keywords: ["gpudirect", "rdma", "peermem", "nvidia-peermem", "infiniband", "nv-p2p", "peer memory"]
+---
+
+GPUDirect is an NVIDIA technology that lets third-party devices — such as InfiniBand/RDMA network adapters and NVMe storage controllers — access GPU memory directly over PCIe, without routing data through the CPU or system memory. This eliminates unnecessary copies and dramatically reduces latency for HPC and AI workloads.
+
+The `nvidia-peermem` kernel module provides the peer memory interface that links the NVIDIA GPU driver to the Linux RDMA subsystem.
+
+## The nvidia-peermem module
+
+**Source location:** `kernel-open/nvidia-peermem/`
+
+`nvidia-peermem` registers the NVIDIA GPU as a *peer memory provider* with the Linux InfiniBand core (`ib_core`). Once registered, RDMA drivers such as `mlx5_ib` can use GPU memory regions as RDMA buffers transparently, without needing GPU-specific code in the network driver itself.
+
+<Note>
+`nvidia-peermem` depends on `nvidia.ko` and must be loaded after the NVIDIA GPU driver is already present. Attempting to load `nvidia-peermem` without `nvidia.ko` will fail.
+</Note>
+
+### Loading the module
+
+```bash
+modprobe nvidia-peermem
+```
+
+To load automatically at boot alongside the NVIDIA driver, add `nvidia-peermem` to your system's module autoload configuration (e.g., `/etc/modules-load.d/nvidia.conf`).
+
+The module exposes two parameters:
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `peerdirect_support` | `0` | Set to `1` for legacy MLNX_OFED 4.9 LTS compatibility |
+| `persistent_api_support` | `1` | Set to `0` to fall back to the legacy non-persistent mapping API |
+
+## The peer_mem API
+
+The peer memory callback interface is defined in `kernel-open/nvidia-peermem/peer_mem.h`. Any kernel driver that wishes to serve as a peer memory provider implements `struct peer_memory_client` and registers it with `ib_register_peer_memory_client()`.
+
+```c
+struct peer_memory_client {
+    char name[IB_PEER_MEMORY_NAME_MAX];
+    char version[IB_PEER_MEMORY_VER_MAX];
+
+    int  (*acquire)(unsigned long addr, size_t size,
+                    void *peer_mem_private_data, char *peer_mem_name,
+                    void **client_context);
+    int  (*get_pages)(unsigned long addr, size_t size, int write, int force,
+                      struct sg_table *sg_head, void *client_context,
+                      u64 core_context);
+    int  (*dma_map)(struct sg_table *sg_head, void *client_context,
+                    struct device *dma_device, int dmasync, int *nmap);
+    int  (*dma_unmap)(struct sg_table *sg_head, void *client_context,
+                      struct device *dma_device);
+    void (*put_pages)(struct sg_table *sg_head, void *client_context);
+    unsigned long (*get_page_size)(void *client_context); /* obsolete */
+    void (*release)(void *client_context);
+};
+```
+
+The `ib_core` calls `acquire()` for each new user-space virtual address range to determine whether any registered provider owns that range. If `nvidia-peermem` claims it (because it falls within GPU memory), the subsequent `get_pages()` → `dma_map()` → `dma_unmap()` → `put_pages()` lifecycle is driven by the RDMA subsystem.
+
+## Key data structures (nv-p2p.h)
+
+The P2P API types are defined in `kernel-open/nvidia-peermem/nv-p2p.h` (also available in `kernel-open/common/inc/nv-p2p.h`). All structures carry a version field; callers should use the provided compatibility macros before accessing fields.
+
+<AccordionGroup>
+  <Accordion title="nvidia_p2p_page_table_t — GPU page table mapping">
+    ```c
+    typedef struct nvidia_p2p_page_table {
+        uint32_t version;       /* NVIDIA_P2P_PAGE_TABLE_VERSION */
+        uint32_t page_size;     /* enum nvidia_p2p_page_size_type */
+        struct nvidia_p2p_page **pages;
+        uint32_t entries;
+        uint8_t  *gpu_uuid;
+        uint32_t flags;         /* e.g. NVIDIA_P2P_PAGE_TABLE_FLAGS_CPU_CACHEABLE */
+    } nvidia_p2p_page_table_t;
+    ```
+
+    Returned by `nvidia_p2p_get_pages()`. The `pages` array holds one `nvidia_p2p_page_t` per GPU page, each containing the physical address of that page. Supported page sizes are 4 KB, 64 KB, and 128 KB.
+  </Accordion>
+  <Accordion title="nvidia_p2p_dma_mapping_t — DMA mapping for peer access">
+    ```c
+    typedef struct nvidia_p2p_dma_mapping {
+        uint32_t version;                           /* NVIDIA_P2P_DMA_MAPPING_VERSION */
+        enum nvidia_p2p_page_size_type page_size_type;
+        uint32_t entries;
+        uint64_t *dma_addresses;
+        void     *private;
+        struct pci_dev *pci_dev;
+    } nvidia_p2p_dma_mapping_t;
+    ```
+
+    Returned by `nvidia_p2p_dma_map_pages()`. The `dma_addresses` array contains one DMA address per mapped page, ready to be programmed into the third-party device's DMA engine.
+  </Accordion>
+  <Accordion title="nvidia_p2p_params_t — P2P mailbox addresses">
+    ```c
+    typedef struct nvidia_p2p_params {
+        uint32_t version;       /* NVIDIA_P2P_PARAMS_VERSION */
+        uint32_t architecture;  /* NVIDIA_P2P_ARCHITECTURE_* */
+        union nvidia_p2p_mailbox_addresses addresses[...];
+    } nvidia_p2p_params_t;
+    ```
+
+    Used with the (unsupported) `nvidia_p2p_init_mapping()` legacy API. Modern code uses `nvidia_p2p_get_pages()` directly.
+  </Accordion>
+</AccordionGroup>
+
+## Exported functions
+
+These symbols are exported by `nvidia.ko` and called by `nvidia-peermem` and other third-party kernel modules.
+
+### Page pinning
+
+<AccordionGroup>
+  <Accordion title="nvidia_p2p_get_pages() — pin GPU memory pages">
+    ```c
+    int nvidia_p2p_get_pages(
+        uint64_t p2p_token,
+        uint32_t va_space,
+        uint64_t virtual_address,   /* must be 64 KB aligned */
+        uint64_t length,            /* must be a multiple of 64 KB */
+        struct nvidia_p2p_page_table **page_table,
+        void (*free_callback)(void *data),
+        void *data
+    );
+    ```
+
+    Pins the GPU physical pages underlying the specified GPU virtual address range and makes them accessible to a third-party device. The caller supplies a `free_callback` that the NVIDIA driver invokes if the pages are freed implicitly (e.g., when the CUDA context is destroyed). This API may sleep.
+
+    For use cases where the pinning must persist independently of a P2P token, use `nvidia_p2p_get_pages_persistent()` instead.
+  </Accordion>
+  <Accordion title="nvidia_p2p_put_pages() — unpin GPU memory pages">
+    ```c
+    int nvidia_p2p_put_pages(
+        uint64_t p2p_token,
+        uint32_t va_space,
+        uint64_t virtual_address,
+        struct nvidia_p2p_page_table *page_table
+    );
+    ```
+
+    Releases pages pinned by `nvidia_p2p_get_pages()`. Must be called before `nvidia_p2p_free_page_table()`. This API may sleep.
+  </Accordion>
+</AccordionGroup>
+
+### DMA mapping
+
+<AccordionGroup>
+  <Accordion title="nvidia_p2p_dma_map_pages() — create DMA mappings">
+    ```c
+    int nvidia_p2p_dma_map_pages(
+        struct pci_dev *peer,
+        struct nvidia_p2p_page_table *page_table,
+        struct nvidia_p2p_dma_mapping **dma_mapping
+    );
+    ```
+
+    Creates DMA mappings for the pages in `page_table` that are accessible from `peer` (the third-party PCIe device). Returns a `nvidia_p2p_dma_mapping_t` containing the DMA addresses to program into the device.
+  </Accordion>
+  <Accordion title="nvidia_p2p_dma_unmap_pages() — remove DMA mappings">
+    ```c
+    int nvidia_p2p_dma_unmap_pages(
+        struct pci_dev *peer,
+        struct nvidia_p2p_page_table *page_table,
+        struct nvidia_p2p_dma_mapping *dma_mapping
+    );
+    ```
+
+    Tears down the DMA mappings created by `nvidia_p2p_dma_map_pages()`. Neither the `dma_mapping` struct nor the addresses it contains are valid after this call returns.
+  </Accordion>
+</AccordionGroup>
+
+### Cleanup
+
+| Function | Description |
+| -------- | ----------- |
+| `nvidia_p2p_free_page_table(page_table)` | Free a page table structure. This is a no-op; the NVIDIA driver owns the lifetime of the page table. |
+| `nvidia_p2p_free_dma_mapping(dma_mapping)` | Free a DMA mapping structure. This is a no-op; the NVIDIA driver owns the lifetime of the mapping. |
+
+## Typical call sequence
+
+```c
+/* 1. Pin the GPU pages and register a free callback */
+nvidia_p2p_get_pages(p2p_token, va_space, gpu_va, length,
+                     &page_table, my_free_callback, my_data);
+
+/* 2. Create DMA mappings for the peer device */
+nvidia_p2p_dma_map_pages(peer_pdev, page_table, &dma_mapping);
+
+/* 3. Program dma_mapping->dma_addresses into the peer device */
+/* ... use the mapping for DMA ... */
+
+/* 4. Tear down when done */
+nvidia_p2p_dma_unmap_pages(peer_pdev, page_table, dma_mapping);
+nvidia_p2p_put_pages(p2p_token, va_space, gpu_va, page_table);
+nvidia_p2p_free_dma_mapping(dma_mapping);
+nvidia_p2p_free_page_table(page_table);
+```
+
+## Use cases
+
+<CardGroup cols={2}>
+  <Card title="GPUDirect RDMA" icon="network">
+    MPI and HPC applications use GPUDirect RDMA so that InfiniBand adapters (Mellanox/NVIDIA ConnectX, for example) can read from and write to GPU buffers directly. This eliminates the CPU staging copy that would otherwise be required for each message.
+  </Card>
+  <Card title="GPUDirect Storage" icon="hard-drive">
+    NVMe controllers and storage adapters that support GPUDirect Storage use the same peer memory interface to transfer data directly between storage and GPU memory, bypassing the host memory bounce buffer.
+  </Card>
+</CardGroup>
+
+<CardGroup cols={2}>
+  <Card title="Modules overview" icon="box" href="/modules/overview">
+    Overview of all kernel modules in this repository.
+  </Card>
+  <Card title="UVM kernel API" icon="layers" href="/integration/uvm-api">
+    How UVM uses the RM interface for unified memory management.
+  </Card>
+</CardGroup>

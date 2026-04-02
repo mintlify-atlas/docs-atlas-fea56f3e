@@ -1,0 +1,237 @@
+---
+title: "UVM Kernel API"
+description: "Reference for the Unified Virtual Memory (UVM) kernel module ioctl interface, UVM-RM communication layer, and architecture-specific support."
+keywords: ["uvm", "unified virtual memory", "ioctl", "nvidia-uvm", "cuda", "nv_uvm_interface"]
+---
+
+The Unified Virtual Memory (UVM) kernel module (`nvidia-uvm`) implements the memory management substrate that the CUDA driver uses for unified memory allocations — memory regions that can be accessed from both the CPU and GPU using a single pointer, with automatic page migration managed by the kernel.
+
+<Note>
+The UVM ioctl interface is an internal kernel API consumed exclusively by the CUDA driver. It is not a stable, public user-space API. Application code must not issue UVM ioctls directly; use the CUDA runtime or driver API instead.
+</Note>
+
+## Device files
+
+| Device | Purpose |
+| ------ | ------- |
+| `/dev/nvidia-uvm` | Primary UVM file descriptor. All UVM ioctls are issued on this fd after calling `UVM_INITIALIZE`. |
+| `/dev/nvidia-uvm-tools` | Secondary interface for profiling and debug tooling. Provides access to event queues, performance counters, and process memory inspection. |
+
+<Info>
+The `/dev/nvidia-uvm-tools` device exposes event tracking (`UVM_TOOLS_INIT_EVENT_TRACKER`), per-processor counters (`UVM_TOOLS_ENABLE_COUNTERS`), and process memory read/write (`UVM_TOOLS_READ_PROCESS_MEMORY`, `UVM_TOOLS_WRITE_PROCESS_MEMORY`). These interfaces are used by NVIDIA profiling tools such as Nsight Systems and the CUDA profiling APIs.
+</Info>
+
+## Ioctl interface overview
+
+UVM ioctls are defined in `kernel-open/nvidia-uvm/uvm_ioctl.h` and `kernel-open/nvidia-uvm/uvm_linux_ioctl.h`. Each ioctl number maps to a typed parameter struct with `// IN` and `// OUT` fields. All 64-bit fields are annotated `NV_ALIGN_BYTES(8)` to enforce alignment regardless of compiler settings.
+
+The file descriptor must be initialized with `UVM_INITIALIZE` before any other ioctl is accepted. All other ioctls return `NV_ERR_ILLEGAL_ACTION` until initialization completes.
+
+## Key UVM operations
+
+<AccordionGroup>
+  <Accordion title="Initialize / deinitialize">
+    Defined in `uvm_linux_ioctl.h`.
+
+    | Ioctl | Number | Description |
+    | ----- | ------ | ----------- |
+    | `UVM_INITIALIZE` | `0x30000001` | Must be the first ioctl issued on a newly opened UVM fd. Accepts a `flags` field (`UVM_INIT_FLAGS_DISABLE_HMM`, `UVM_INIT_FLAGS_MULTI_PROCESS_SHARING_MODE`). |
+    | `UVM_DEINITIALIZE` | `0x30000002` | Tears down the UVM context associated with the fd. |
+
+    ```c
+    typedef struct {
+        NvU64     flags     NV_ALIGN_BYTES(8); // IN
+        NV_STATUS rmStatus;                    // OUT
+    } UVM_INITIALIZE_PARAMS;
+    ```
+
+    On Linux, a secondary fd may also be opened and initialized with `UVM_MM_INITIALIZE` (ioctl 75). This secondary fd holds a reference on the process memory map, preventing UVM from being torn down while the address space is still live.
+  </Accordion>
+
+  <Accordion title="GPU registration / unregistration">
+    | Ioctl | Number | Description |
+    | ----- | ------ | ----------- |
+    | `UVM_REGISTER_GPU` | `37` | Register a GPU (identified by UUID) with the UVM context. Returns NUMA node information when applicable. Requires an RM control fd and client handle. |
+    | `UVM_UNREGISTER_GPU` | `38` | Unregister a GPU from the UVM context. |
+    | `UVM_REGISTER_GPU_VASPACE` | `25` | Register an RM GPU virtual address space with UVM. |
+    | `UVM_UNREGISTER_GPU_VASPACE` | `26` | Unregister a GPU VA space. |
+    | `UVM_REGISTER_CHANNEL` | `27` | Register an RM GPU channel with UVM, providing the base address and length of the channel's pushbuffer. |
+    | `UVM_UNREGISTER_CHANNEL` | `28` | Unregister a GPU channel. |
+    | `UVM_ENABLE_PEER_ACCESS` | `29` | Enable peer access between two GPUs (identified by UUID pair). |
+    | `UVM_DISABLE_PEER_ACCESS` | `30` | Disable peer access between two GPUs. |
+
+    ```c
+    typedef struct {
+        NvProcessorUuid gpu_uuid;
+        NvBool          numaEnabled; // OUT
+        NvS32           numaNodeId;  // OUT
+        NvS32           rmCtrlFd;    // IN
+        NvHandle        hClient;     // IN
+        NvHandle        hSmcPartRef; // IN
+        NV_STATUS       rmStatus;    // OUT
+    } UVM_REGISTER_GPU_PARAMS;
+    ```
+  </Accordion>
+
+  <Accordion title="Range groups">
+    Range groups allow sets of virtual address ranges to be migrated together atomically.
+
+    | Ioctl | Number | Description |
+    | ----- | ------ | ----------- |
+    | `UVM_CREATE_RANGE_GROUP` | `23` | Allocate a new range group; returns a 64-bit `rangeGroupId`. |
+    | `UVM_DESTROY_RANGE_GROUP` | `24` | Destroy a range group. |
+    | `UVM_SET_RANGE_GROUP` | `31` | Associate a virtual address range with a range group. |
+    | `UVM_PREVENT_MIGRATION_RANGE_GROUPS` | `40` | Prevent migration of up to 32 range groups per call. |
+    | `UVM_ALLOW_MIGRATION_RANGE_GROUPS` | `41` | Re-enable migration for range groups. |
+
+    ```c
+    typedef struct {
+        NvU64     rangeGroupId NV_ALIGN_BYTES(8); // OUT
+        NV_STATUS rmStatus;
+    } UVM_CREATE_RANGE_GROUP_PARAMS;
+    ```
+  </Accordion>
+
+  <Accordion title="Memory migration">
+    | Ioctl | Number | Description |
+    | ----- | ------ | ----------- |
+    | `UVM_MIGRATE` | `51` | Migrate a virtual address range to a destination processor (CPU or GPU UUID). Supports synchronous and asynchronous (`UVM_MIGRATE_FLAG_ASYNC`) modes with optional semaphore completion notification. For pageable memory, may return `NV_WARN_NOTHING_TO_DO` or `NV_ERR_MORE_PROCESSING_REQUIRED` to request user-space cooperation via `move_pages`. |
+    | `UVM_MIGRATE_RANGE_GROUP` | `53` | Migrate all ranges in a range group to a destination processor. |
+
+    ```c
+    typedef struct {
+        NvU64           base               NV_ALIGN_BYTES(8); // IN
+        NvU64           length             NV_ALIGN_BYTES(8); // IN
+        NvProcessorUuid destinationUuid;                      // IN
+        NvU32           flags;                                // IN
+        NvU64           semaphoreAddress   NV_ALIGN_BYTES(8); // IN
+        NvU32           semaphorePayload;                     // IN
+        NvS32           cpuNumaNode;                          // IN
+        NvU64           userSpaceStart     NV_ALIGN_BYTES(8); // OUT
+        NvU64           userSpaceLength    NV_ALIGN_BYTES(8); // OUT
+        NV_STATUS       rmStatus;                             // OUT
+    } UVM_MIGRATE_PARAMS;
+    ```
+  </Accordion>
+
+  <Accordion title="External allocation mapping">
+    | Ioctl | Number | Description |
+    | ----- | ------ | ----------- |
+    | `UVM_MAP_EXTERNAL_ALLOCATION` | `33` | Map an RM allocation (identified by client and memory handles) into the UVM virtual address space with per-GPU mapping attributes. |
+    | `UVM_UNMAP_EXTERNAL` | `66` | Unmap an external allocation from the UVM address space for a specific GPU. |
+    | `UVM_CREATE_EXTERNAL_RANGE` | `73` | Reserve a virtual address range for external mappings. |
+    | `UVM_MAP_EXTERNAL_SPARSE` | `74` | Map a sparse (uncommitted) region for a GPU. |
+    | `UVM_ALLOC_DEVICE_P2P` | `78` | Map an RM allocation for device-to-device P2P access. |
+
+    Per-GPU mapping attributes are specified using `UvmGpuMappingAttributes`, which encodes the mapping type, caching policy, format, element bit width, and compression type for each GPU.
+  </Accordion>
+
+  <Accordion title="Memory policy and hints">
+    | Ioctl | Number | Description |
+    | ----- | ------ | ----------- |
+    | `UVM_SET_PREFERRED_LOCATION` | `42` | Hint that a virtual range should reside on a specific processor. |
+    | `UVM_UNSET_PREFERRED_LOCATION` | `43` | Remove the preferred location hint. |
+    | `UVM_ENABLE_READ_DUPLICATION` | `44` | Allow UVM to keep read-only copies on multiple processors simultaneously. |
+    | `UVM_DISABLE_READ_DUPLICATION` | `45` | Disable read duplication. |
+    | `UVM_SET_ACCESSED_BY` | `46` | Request that a range always be mapped on a given processor, even when not resident there. |
+    | `UVM_UNSET_ACCESSED_BY` | `47` | Remove an accessed-by hint. |
+    | `UVM_PAGEABLE_MEM_ACCESS` | `39` | Query whether the system supports transparent access to pageable memory. |
+    | `UVM_PAGEABLE_MEM_ACCESS_ON_GPU` | `70` | Query pageable memory access support for a specific GPU. |
+    | `UVM_POPULATE_PAGEABLE` | `71` | Force population of a pageable virtual range. |
+    | `UVM_DISCARD` | `80` | Discard the contents of a managed range, optionally unmapping the pages. |
+    | `UVM_CLEAR_ALL_ACCESS_COUNTERS` | `79` | Clear all GPU access counter state. |
+  </Accordion>
+
+  <Accordion title="Tools and profiling ioctls">
+    All tools ioctls are available on `/dev/nvidia-uvm-tools`.
+
+    | Ioctl | Number | Description |
+    | ----- | ------ | ----------- |
+    | `UVM_TOOLS_INIT_EVENT_TRACKER` | `56` | Initialize an event queue for a specific processor or all processors. |
+    | `UVM_TOOLS_INIT_EVENT_TRACKER_V2` | `76` | Version 2 of event tracker initialization. |
+    | `UVM_TOOLS_SET_NOTIFICATION_THRESHOLD` | `57` | Set the event queue notification threshold. |
+    | `UVM_TOOLS_EVENT_QUEUE_ENABLE_EVENTS` | `58` | Enable specific event types by bitmask. |
+    | `UVM_TOOLS_EVENT_QUEUE_DISABLE_EVENTS` | `59` | Disable specific event types. |
+    | `UVM_TOOLS_ENABLE_COUNTERS` | `60` | Enable performance counters by bitmask. |
+    | `UVM_TOOLS_DISABLE_COUNTERS` | `61` | Disable performance counters. |
+    | `UVM_TOOLS_READ_PROCESS_MEMORY` | `62` | Read memory from a target process virtual address. |
+    | `UVM_TOOLS_WRITE_PROCESS_MEMORY` | `63` | Write memory to a target process virtual address. |
+    | `UVM_TOOLS_GET_PROCESSOR_UUID_TABLE` | `64` | Retrieve the table of processor UUIDs known to UVM. |
+    | `UVM_TOOLS_GET_PROCESSOR_UUID_TABLE_V2` | `77` | Version 2 of the UUID table retrieval. |
+    | `UVM_TOOLS_FLUSH_EVENTS` | `67` | Flush any pending events to the queue. |
+
+    Event types tracked by the tools interface include: CPU/GPU page faults, memory migrations, read-duplicate events, page-size changes, thrashing detection, throttling start/end, remote mappings, and evictions.
+  </Accordion>
+</AccordionGroup>
+
+## Key types from uvm_types.h
+
+`kernel-open/nvidia-uvm/uvm_types.h` defines the shared types used across the ioctl parameter structs.
+
+| Type | Description |
+| ---- | ----------- |
+| `UvmStream` | 64-bit stream identifier. Special values: `UVM_STREAM_INVALID` (0), `UVM_STREAM_ALL` (2), `UVM_STREAM_NONE` (3). |
+| `UvmGpuMappingAttributes` | Per-GPU mapping descriptor: UUID, `UvmGpuMappingType`, `UvmGpuCachingType`, `UvmGpuFormatType`, element bits, `UvmGpuCompressionType`. |
+| `UvmCounterScope` | Scope for performance counters: `UvmCounterScopeProcessSingleGpu`, `UvmCounterScopeProcessAllGpu`, `UvmCounterScopeGlobalSingleGpu`. |
+| `UvmCounterName` | Counter identifier: bytes transferred host-to-device, device-to-host, CPU page fault count, GPU page fault count, prefetch bytes, etc. |
+| `UvmCounterConfig` | Configuration struct passed to `UVM_ENABLE_COUNTERS`: scope, counter name, GPU UUID, and enable/disable state. |
+| `UvmEventType` | Event type enum used with tools ioctls: `UvmEventTypeMigration`, `UvmEventTypeGpuFault`, `UvmEventTypeCpuFault`, `UvmEventTypeThrashingDetected`, and more. |
+| `UvmGpuPlatformParams` | Union of platform-specific GPU registration parameters (Linux RM control fd + client handle). |
+
+### Initialization flags
+
+| Flag | Value | Effect |
+| ---- | ----- | ------ |
+| `UVM_INIT_FLAGS_DISABLE_HMM` | `0x1` | Disable Heterogeneous Memory Management integration. |
+| `UVM_INIT_FLAGS_MULTI_PROCESS_SHARING_MODE` | `0x2` | Enable multi-process sharing of UVM resources. |
+
+## The UVM-RM interface (nv_uvm_interface.h)
+
+UVM communicates with the Resource Manager (`nvidia.ko`) through an internal function table defined in `kernel-open/common/inc/nv_uvm_interface.h`. This is not an ioctl interface — it is a direct kernel-to-kernel call interface used only between `nvidia-uvm.ko` and `nvidia.ko`.
+
+Key functions in this interface include:
+
+| Function | Description |
+| -------- | ----------- |
+| `nvUvmInterfaceRegisterGpu()` | Register a GPU by physical UUID; returns PCIe device info and DMA address range. |
+| `nvUvmInterfaceUnregisterGpu()` | Drop the registration reference for a GPU. |
+| `nvUvmInterfaceSessionCreate()` | Create an RM session object for UVM. |
+| `nvUvmInterfaceSessionDestroy()` | Destroy an RM session. |
+| `nvUvmInterfaceAddressSpaceCreate()` | Create an RM GPU virtual address space. |
+| `nvUvmInterfaceAddressSpaceDestroy()` | Destroy a GPU address space. |
+| `nvUvmInterfaceMemoryAllocFB()` | Allocate framebuffer (GPU-side) memory via RM. |
+| `nvUvmInterfaceMemoryAllocSys()` | Allocate system memory via RM. |
+| `nvUvmInterfaceMemoryFree()` | Free an RM memory allocation. |
+| `nvUvmInterfaceChannelAllocate()` | Allocate a GPU channel. |
+| `nvUvmInterfaceChannelDestroy()` | Destroy a GPU channel. |
+| `nvUvmInterfaceTsgAllocate()` | Allocate a time-slice group. |
+| `nvUvmInterfaceTsgDestroy()` | Destroy a time-slice group. |
+
+This interface is versioned. Mismatches between the `nvidia-uvm` and `nvidia` modules from different driver releases will cause the UVM module to refuse to load.
+
+## Architecture-specific support
+
+The UVM module includes architecture-specific implementations for each supported GPU generation. These modules handle fault buffer formats, CE (Copy Engine) programming, MMU page table layouts, and host interface differences.
+
+| Architecture | GPU families | Source files |
+| ------------ | ------------ | ------------ |
+| Turing | TU10x, TU11x | `uvm_turing.c`, `uvm_turing_mmu.c`, `uvm_turing_fault_buffer.c`, `uvm_turing_ce.c`, `uvm_turing_host.c`, `uvm_turing_sec2.c` |
+| Ampere | GA10x | `uvm_ampere.c`, `uvm_ampere_mmu.c`, `uvm_ampere_fault_buffer.c`, `uvm_ampere_ce.c`, `uvm_ampere_host.c` |
+| Hopper | GH100 | `uvm_hopper.c`, `uvm_hopper_mmu.c`, `uvm_hopper_fault_buffer.c`, `uvm_hopper_ce.c`, `uvm_hopper_host.c`, `uvm_hopper_sec2.c` |
+| Ada Lovelace | AD10x | `uvm_ada.c` |
+| Blackwell | GB10x, GB20x | `uvm_blackwell.c`, `uvm_blackwell_mmu.c`, `uvm_blackwell_fault_buffer.c`, `uvm_blackwell_ce.c`, `uvm_blackwell_host.c` |
+
+<CardGroup cols={2}>
+  <Card title="nvidia-uvm module" icon="layers" href="/modules/nvidia-uvm">
+    Module overview, build configuration, and loading order.
+  </Card>
+  <Card title="GPUDirect peer memory" icon="network" href="/integration/peer-memory">
+    How nvidia-peermem bridges UVM and RDMA for GPU-direct transfers.
+  </Card>
+  <Card title="GSP firmware architecture" icon="microchip" href="/architecture/gsp-firmware">
+    How GSP-RM interacts with UVM and the Resource Manager.
+  </Card>
+  <Card title="Nouveau driver integration" icon="box" href="/integration/nouveau">
+    Using GSP firmware with the open-source Nouveau driver.
+  </Card>
+</CardGroup>

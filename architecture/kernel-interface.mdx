@@ -1,0 +1,132 @@
+---
+title: "Kernel Interface Layer"
+description: "How NVIDIA's open kernel modules interface with the Linux kernel, and why the driver is split into two components."
+---
+
+The kernel interface layer is the Linux-specific half of each NVIDIA kernel module. It lives entirely under `kernel-open/` and is compiled fresh for every target kernel, while the OS-agnostic component (the GPU Resource Manager) ships as a pre-built binary object that remains stable across kernel versions.
+
+## Why the split?
+
+NVIDIA kernel modules are divided into two components to solve a fundamental tension: the GPU Resource Manager (RM) is large, complex, and time-consuming to compile, but the Linux kernel ABI changes frequently between releases.
+
+<CardGroup cols={2}>
+  <Card title="OS-Agnostic Component" href="/architecture/os-agnostic">
+    Hardware abstraction and GPU Resource Manager. Compiled once, distributed as `nv-kernel.o_binary` and `nv-modeset-kernel.o_binary`.
+  </Card>
+  <Card title="Kernel Interface Layer" href="/architecture/kernel-interface">
+    Linux-specific glue code. Must be compiled against the running kernel's headers. Licensed MIT/GPLv2 dual license.
+  </Card>
+</CardGroup>
+
+The kernel interface layer is intentionally thin. Its job is to translate between Linux kernel APIs — memory management, PCI, interrupts, DMA, timers — and the OS-neutral abstractions that the Resource Manager expects. This means only a small, well-defined surface area needs to be recompiled and adjusted when the kernel changes.
+
+## Directory structure
+
+```
+kernel-open/
+├── nvidia/          # Core driver interface for nvidia.ko
+├── nvidia-drm/      # DRM subsystem interface for nvidia-drm.ko
+├── nvidia-modeset/  # Display interface for nvidia-modeset.ko
+├── nvidia-uvm/      # Unified Memory interface for nvidia-uvm.ko
+└── nvidia-peermem/  # GPUDirect peer memory for nvidia-peermem.ko
+```
+
+Each subdirectory corresponds to one loadable kernel module. The `nvidia/` directory is by far the largest, containing the full Linux-side implementation for the core driver.
+
+## Key responsibilities
+
+<Steps>
+  <Step title="PCI device enumeration and initialization">
+    `nv-pci.c` registers the driver with the Linux PCI subsystem, handles device probe and remove callbacks, sets up BARs, and manages power state transitions. The PCI device ID table is maintained in `nv-pci-table.c`.
+  </Step>
+  <Step title="Memory mapping">
+    `nv-mmap.c` implements the `mmap(2)` file operation so that user-space can map GPU framebuffer and MMIO regions. `nv-vm.c` handles the underlying virtual memory plumbing, including tracking pinned pages and managing mapping caches.
+  </Step>
+  <Step title="DMA operations">
+    `nv-dma.c` wraps the Linux DMA API to allocate coherent and streaming DMA buffers, map scatter-gather lists, and manage IOMMU domains for the GPU.
+  </Step>
+  <Step title="Interrupt handling">
+    `nv-msi.c` enables MSI and MSI-X interrupts, registers the top-half interrupt handler, and schedules deferred work to process GPU interrupts without holding locks in interrupt context.
+  </Step>
+  <Step title="Procfs interface">
+    `nv-procfs.c` creates entries under `/proc/driver/nvidia/` that expose per-GPU state, version information, and registry key overrides for debugging and configuration.
+  </Step>
+  <Step title="Character device and ioctl dispatch">
+    `nv.c` creates the `/dev/nvidiaX` character devices and implements the `ioctl(2)` dispatch loop. Requests from user-space are validated, then forwarded to the Resource Manager running in the OS-agnostic layer via the `os-interface` abstraction.
+  </Step>
+</Steps>
+
+## The os-interface abstraction
+
+The bridge between the kernel interface layer and the OS-agnostic component is defined in two files:
+
+| File | Role |
+|------|------|
+| `kernel-open/common/inc/os-interface.h` | Declares the full set of OS service functions the Resource Manager may call |
+| `kernel-open/nvidia/os-interface.c` | Implements those functions using Linux kernel APIs |
+
+`os-interface.h` declares more than 100 functions covering memory allocation, PCI config space access, synchronization primitives, timers, and more. A representative excerpt:
+
+```c
+NV_STATUS NV_API_CALL os_alloc_mem(void **, NvU64);
+void      NV_API_CALL os_free_mem(void *);
+void*     NV_API_CALL os_pci_init_handle(NvU32, NvU8, NvU8, NvU8, NvU16 *, NvU16 *);
+NV_STATUS NV_API_CALL os_pci_read_dword(void *, NvU32, NvU32 *);
+NV_STATUS NV_API_CALL os_alloc_mutex(void **);
+NV_STATUS NV_API_CALL os_acquire_mutex(void *);
+void      NV_API_CALL os_release_mutex(void *);
+```
+
+Because the Resource Manager only calls into the OS through this interface, the same RM binary can link against a different `os-interface.c` implementation for a different operating system — which is how NVIDIA supports FreeBSD with the same core codebase.
+
+## Kernel version compatibility
+
+Linux kernel APIs change frequently. The kernel interface layer handles this through two mechanisms:
+
+<Tabs>
+  <Tab title="conftest.h">
+    At build time, a set of compile-time probe tests determines which kernel APIs and types are available. Results are written into generated `conftest/` headers (functions, macros, symbols, types, etc.) that are included via `conftest.h`.
+
+    ```c
+    /* conftest.h pulls in all generated compatibility probes */
+    #include "conftest/headers.h"
+    #include "conftest/functions.h"
+    #include "conftest/generic.h"
+    #include "conftest/macros.h"
+    #include "conftest/symbols.h"
+    #include "conftest/types.h"
+    ```
+
+    Driver source files then use `#ifdef NV_...` guards to select the correct API path for the running kernel.
+  </Tab>
+  <Tab title="header-presence-tests.mk">
+    `kernel-open/header-presence-tests.mk` drives the Makefile-level detection of kernel headers. For each header under test, a small C fragment is compiled against the actual kernel tree. Success or failure sets a `NV_KERNEL_...` variable that feeds into the conftest generation.
+
+    This two-stage system (Makefile detection + C-level guards) lets a single source tree build cleanly against Linux kernels from 4.15 through current.
+  </Tab>
+</Tabs>
+
+<Note>
+The kernel interface layer must be compiled with the same toolchain used to build the target kernel. If you are cross-compiling, pass `TARGET_ARCH`, `CC`, `LD`, `AR`, `CXX`, and `OBJCOPY` on the make command line. See the [build from source](/building/build-from-source) guide for details.
+</Note>
+
+## Licensing
+
+The kernel interface layer is dual-licensed under MIT and GPLv2. This is necessary because it links directly against GPL-only kernel symbols. The OS-agnostic component, distributed as a binary, does not need to satisfy GPL linking requirements because it communicates with the kernel interface layer only through the `os-interface` abstraction boundary.
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="OS-Agnostic Component" href="/architecture/os-agnostic">
+    The GPU Resource Manager that the kernel interface layer wraps
+  </Card>
+  <Card title="GSP Firmware" href="/architecture/gsp-firmware">
+    The on-GPU processor that handles much of the RM's traditional workload
+  </Card>
+  <Card title="nvidia.ko" href="/modules/nvidia-ko">
+    The core module that combines the kernel interface layer with nv-kernel.o_binary
+  </Card>
+  <Card title="Build from Source" href="/building/build-from-source">
+    How to compile the kernel interface layer for your kernel
+  </Card>
+</CardGroup>

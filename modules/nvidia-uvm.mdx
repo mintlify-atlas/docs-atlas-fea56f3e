@@ -1,0 +1,155 @@
+---
+title: "nvidia-uvm.ko — Unified Virtual Memory"
+description: "The NVIDIA Unified Virtual Memory module: enables transparent CPU–GPU memory sharing, page migration, and CUDA unified memory."
+---
+
+`nvidia-uvm.ko` implements NVIDIA Unified Virtual Memory (UVM) — a programming model where the CPU and GPU share a single virtual address space. The driver transparently migrates memory pages between host RAM and GPU framebuffer on demand, guided by access patterns and configurable prefetch heuristics.
+
+<Note>
+`nvidia-uvm.ko` depends on `nvidia.ko` and must be loaded after it. All other modules (`nvidia-modeset.ko`, `nvidia-drm.ko`) are independent of `nvidia-uvm.ko`.
+</Note>
+
+## Role and responsibilities
+
+- **Unified address space** — maps the same virtual address range into both CPU and GPU page tables
+- **Transparent page migration** — moves pages between host RAM and GPU framebuffer on fault
+- **Prefetching** — access counter-based and heuristic-driven prefetch to reduce fault latency
+- **HMM integration** — Heterogeneous Memory Management for CPU-side system memory faults
+- **ATS support** — Address Translation Services over PCIe for direct GPU access to host memory without migration
+- **Fault replay** — GPU MMU faults are held and replayed after the required page is populated
+- **Tools support** — `/dev/nvidia-uvm-tools` provides profiling and debugging access
+
+## CUDA unified memory
+
+`nvidia-uvm.ko` is the kernel component that powers `cudaMallocManaged`. When a CUDA application allocates managed memory:
+
+1. A virtual address range is reserved in both the CPU and GPU address spaces.
+2. On first access (CPU or GPU), an MMU fault is delivered to `nvidia-uvm.ko`.
+3. The driver allocates a physical page, populates it, and maps it into the faulting processor's page table.
+4. On subsequent access from the other processor, the page is migrated and the old mapping is unmapped.
+
+```c
+// CUDA application example
+float *data;
+cudaMallocManaged(&data, N * sizeof(float)); // UVM allocation
+
+// CPU access — page resident in host RAM
+data[0] = 1.0f;
+
+// GPU kernel access — UVM migrates pages to GPU framebuffer
+kernel<<<grid, block>>>(data, N);
+```
+
+## Key features
+
+<Tabs>
+  <Tab title="Page migration">
+    Pages move between host RAM and GPU framebuffer transparently. The migration engine uses:
+
+    - **GPU Copy Engines (CE)** for bulk DMA transfers
+    - **Fault buffer** to capture and batch GPU MMU faults
+    - **Fault replay** to resume GPU execution after migration completes
+
+    Migration respects NUMA locality when the host has multiple NUMA nodes.
+  </Tab>
+  <Tab title="Prefetching">
+    UVM includes two prefetch mechanisms to hide migration latency:
+
+    - **Access counter prefetch** — the GPU's hardware access counters report frequently-accessed remote pages; UVM migrates them proactively.
+    - **Heuristic prefetch** (`uvm_perf_prefetch.c`) — detects sequential and strided access patterns and prefetches ahead of the access frontier.
+  </Tab>
+  <Tab title="HMM integration">
+    With Heterogeneous Memory Management (HMM), `nvidia-uvm.ko` registers as a device-private memory manager. System memory pages can be device-private, meaning the GPU can access them through its MMU without explicit migration in some configurations. Source: `uvm_hmm.c`.
+  </Tab>
+  <Tab title="ATS (PCIe)">
+    On platforms that support PCIe Address Translation Services, the GPU can directly access host physical memory using ATS/PASID without migrating pages. UVM manages the ATS context and falls back to software fault handling when ATS is unavailable. Source: `uvm_ats.c`, `uvm_ats_sva.c`, `uvm_ats_faults.c`.
+  </Tab>
+</Tabs>
+
+## Device files
+
+| Device node | Purpose |
+|---|---|
+| `/dev/nvidia-uvm` | Primary UVM device; used by the CUDA driver for all UVM operations |
+| `/dev/nvidia-uvm-tools` | Secondary device for profiling tools (Nsight, `cuda-memcheck`) |
+
+## Key header files
+
+| Header | Contents |
+|---|---|
+| `uvm_ioctl.h` | Full UVM ioctl interface: `UVM_RESERVE_VA`, `UVM_REGION_COMMIT`, `UVM_MIGRATE`, `UVM_REGISTER_GPU`, and ~60 additional commands |
+| `uvm_linux_ioctl.h` | Linux-specific ioctl dispatch and `unlocked_ioctl` implementation |
+| `uvm_api.h` | Internal ioctl routing macros (`UVM_ROUTE_CMD_STACK_*`, `UVM_ROUTE_CMD_ALLOC_*`) |
+| `uvm_types.h` | Fundamental UVM types: `UvmStream`, `NvProcessorUuid`, `UvmEventEntry` |
+
+### Selected ioctls from `uvm_ioctl.h`
+
+| ioctl | Command number | Description |
+|---|---|---|
+| `UVM_RESERVE_VA` | 1 | Reserve a virtual address range for UVM |
+| `UVM_RELEASE_VA` | 2 | Release a reserved range |
+| `UVM_REGION_COMMIT` | 3 | Commit a region (associate with a GPU and stream) |
+| `UVM_REGION_DECOMMIT` | 4 | Decommit a region |
+| `UVM_REGISTER_GPU` | — | Register a GPU with a UVM file descriptor |
+| `UVM_UNREGISTER_GPU` | — | Unregister a GPU |
+| `UVM_MIGRATE` | — | Explicitly migrate a range to a target processor |
+| `UVM_PREVENT_MIGRATION_RANGE_GROUPS` | — | Pin a range group to prevent migration |
+
+## Source structure and architecture-specific implementations
+
+`nvidia-uvm.ko` is a **pure kernel interface layer** with no OS-agnostic binary. All code is compiled from source.
+
+The source (`kernel-open/nvidia-uvm/`) is organised around hardware generations, with each GPU architecture providing its own implementations of the core UVM subsystems:
+
+| Architecture | CE | Fault buffer | Host | MMU |
+|---|---|---|---|---|
+| Turing | `uvm_turing_ce.c` | `uvm_turing_fault_buffer.c` | `uvm_turing_host.c` | `uvm_turing_mmu.c` |
+| Ampere | `uvm_ampere_ce.c` | `uvm_ampere_fault_buffer.c` | `uvm_ampere_host.c` | `uvm_ampere_mmu.c` |
+| Hopper | `uvm_hopper_ce.c` | `uvm_hopper_fault_buffer.c` | `uvm_hopper_host.c` | `uvm_hopper_mmu.c` |
+| Ada Lovelace | `uvm_ada.c` (ext. Ampere) | `uvm_ada_fault_buffer.h` | — | — |
+| Blackwell | `uvm_blackwell_ce.c` | `uvm_blackwell_fault_buffer.c` | `uvm_blackwell_host.c` | `uvm_blackwell_mmu.c` |
+
+Each generation can extend or replace the hardware abstraction layer (HAL) callbacks registered in `uvm_hal.c` / `uvm_hal.h`.
+
+### Core subsystem files
+
+| File | Subsystem |
+|---|---|
+| `uvm.c`, `uvm.h` | Module init/exit, device file operations |
+| `uvm_gpu.c`, `uvm_gpu.h` | GPU object lifecycle and per-GPU state |
+| `uvm_va_space.c` | Virtual address space management |
+| `uvm_va_block.c` | Page-level residency tracking and migration |
+| `uvm_migrate.c` | Explicit migration path |
+| `uvm_gpu_replayable_faults.c` | Replayable (recoverable) GPU fault handling |
+| `uvm_gpu_non_replayable_faults.c` | Non-replayable fault handling |
+| `uvm_gpu_access_counters.c` | Hardware access counter management |
+| `uvm_hmm.c` | HMM integration for CPU-side faults |
+| `uvm_perf_prefetch.c` | Heuristic prefetch engine |
+| `uvm_perf_thrashing.c` | Thrashing detection and mitigation |
+| `uvm_pmm_gpu.c` | GPU physical memory manager |
+| `uvm_channel.c` | GPU command submission channels |
+| `uvm_mmu.c` | MMU page table management |
+| `uvm_tools.c` | Tools/profiling event injection |
+
+## Loading and unloading
+
+```bash
+# Load (nvidia.ko is loaded automatically as a dependency)
+modprobe nvidia-uvm
+
+# Unload
+modprobe -r nvidia-uvm
+```
+
+## Verifying the module
+
+```bash
+# Check device nodes are present
+ls -la /dev/nvidia-uvm*
+
+# View UVM state via procfs (if enabled)
+cat /proc/driver/nvidia-uvm/version
+
+# Check module is loaded
+lsmod | grep nvidia_uvm
+```

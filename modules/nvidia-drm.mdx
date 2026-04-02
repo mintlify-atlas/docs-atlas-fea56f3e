@@ -1,0 +1,121 @@
+---
+title: "nvidia-drm.ko — DRM/KMS Interface"
+description: "The NVIDIA Direct Rendering Manager module: integrates the GPU with the Linux DRM subsystem for display management and GEM buffer sharing."
+---
+
+`nvidia-drm.ko` bridges NVIDIA's display hardware to the standard Linux [Direct Rendering Manager (DRM)](https://www.kernel.org/doc/html/latest/gpu/drm-internals.html) subsystem. It registers a DRM device for each GPU and implements the KMS (Kernel Mode Setting) objects — CRTCs, connectors, encoders, and framebuffers — that compositors and display servers use to control display output.
+
+<Info>
+By exposing a standard DRM/KMS interface, `nvidia-drm.ko` enables Wayland compositors (such as GNOME Mutter, KDE KWin, and wlroots-based compositors) and X.Org's modesetting driver to control NVIDIA displays through the same API used for other GPU vendors. It also provides GEM memory objects and DMA-BUF support for zero-copy buffer sharing between the GPU and other kernel drivers (e.g. video codecs, capture cards).
+</Info>
+
+## Role and responsibilities
+
+- **DRM device registration** — registers an `nvidia-drm` DRM device for each GPU
+- **KMS objects** — implements CRTCs, connectors, encoders, planes, and framebuffers
+- **GEM memory objects** — exposes GPU memory allocations as GEM (Graphics Execution Manager) handles
+- **DMA-BUF** — imports and exports DMA-BUF file descriptors for cross-driver buffer sharing
+- **Fences** — DMA fences and explicit sync primitives for GPU timeline synchronisation
+- **Atomic modesetting** — uses the DRM atomic API for race-free display configuration changes
+
+## Architecture
+
+`nvidia-drm.ko` is a **pure kernel interface layer** — it has no OS-agnostic component. Unlike `nvidia.ko` and `nvidia-modeset.ko`, all of its code is compiled directly from source against the running kernel.
+
+```
+User space (compositor / display server)
+        │  DRM ioctls on /dev/dri/card0
+        ▼
+   nvidia-drm.ko   ◄──── depends on ────► nvidia-modeset.ko (NVKMS display engine)
+        │                                          │
+        └──────────── depends on ─────────────► nvidia.ko (RM / hardware)
+```
+
+Display configuration requests flow from `nvidia-drm.ko` down through `nvidia-modeset.ko` (which owns the hardware display pipeline) and ultimately to `nvidia.ko` (which owns the GPU hardware).
+
+## Key source files
+
+All source files are in `kernel-open/nvidia-drm/`:
+
+| File | Purpose |
+|---|---|
+| `nvidia-drm.c` | Module init/exit; DRM driver registration |
+| `nvidia-drm-drv.c` | Core DRM driver structure and callbacks |
+| `nvidia-drm-crtc.c` | CRTC (display controller) object implementation |
+| `nvidia-drm-connector.c` | Connector objects (HDMI, DisplayPort, etc.) |
+| `nvidia-drm-encoder.c` | Encoder objects linking CRTCs to connectors |
+| `nvidia-drm-fb.c` | Framebuffer object implementation |
+| `nvidia-drm-gem.c` | GEM object base class and common operations |
+| `nvidia-drm-gem-nvkms-memory.c` | GEM objects backed by NVKMS-managed GPU memory |
+| `nvidia-drm-gem-dma-buf.c` | DMA-BUF import/export for cross-driver sharing |
+| `nvidia-drm-gem-user-memory.c` | GEM objects backed by user-space memory |
+| `nvidia-drm-fence.c` | DMA fence and explicit sync implementation |
+| `nvidia-drm-modeset.c` | Atomic KMS helpers; translates DRM atomic state to NVKMS calls |
+| `nvidia-drm-format.c` | DRM pixel format enumeration and validation |
+| `nvidia-drm-linux.c` | Linux-specific OS glue |
+| `nvidia-drm-os-interface.c` | OS abstraction layer |
+
+## DRM subsystem objects
+
+`nvidia-drm.ko` implements the full set of DRM KMS objects:
+
+<Tabs>
+  <Tab title="Display pipeline">
+    | DRM object | Description |
+    |---|---|
+    | `drm_crtc` | Represents one display controller / scanout engine |
+    | `drm_encoder` | Converts CRTC output to a signal suitable for the connector |
+    | `drm_connector` | Represents a physical display output (HDMI, DP, etc.) |
+    | `drm_plane` | Scanout plane (primary, overlay, cursor) |
+    | `drm_framebuffer` | Wraps a GEM buffer as a scannable framebuffer |
+  </Tab>
+  <Tab title="Memory objects">
+    | GEM type | Backed by |
+    |---|---|
+    | NVKMS memory | GPU framebuffer memory managed by `nvidia-modeset.ko` |
+    | DMA-BUF import | Buffers exported by another kernel driver |
+    | DMA-BUF export | GPU buffers shared with other drivers (e.g. v4l2, media) |
+    | User memory | User-space virtual memory pinned for GPU access |
+  </Tab>
+</Tabs>
+
+## DMA-BUF buffer sharing
+
+`nvidia-drm.ko` implements both sides of the DMA-BUF protocol:
+
+```c
+// Export a GPU buffer as a DMA-BUF file descriptor (simplified)
+// nvidia-drm-gem-dma-buf.c handles the dma_buf_ops callbacks
+struct dma_buf *dma_buf = drm_gem_prime_export(gem_obj, flags);
+
+// Import a DMA-BUF from another driver
+struct drm_gem_object *gem = drm_gem_prime_import(dev, dma_buf);
+```
+
+This enables zero-copy workflows such as rendering to a surface that is directly consumed by a video encoder or a capture device.
+
+## Loading and dependencies
+
+`nvidia-drm.ko` depends on both `nvidia.ko` and `nvidia-modeset.ko`. The kernel module dependency system enforces this automatically.
+
+```bash
+# Load (automatically loads nvidia.ko and nvidia-modeset.ko first)
+modprobe nvidia-drm
+
+# Unload in reverse dependency order
+modprobe -r nvidia-drm
+```
+
+<Info>
+Atomic KMS (`modeset`) is **enabled by default** (`modeset=1`). You only need to set `options nvidia-drm modeset=0` in `/etc/modprobe.d/nvidia.conf` if you explicitly want to disable it. Wayland and the X.Org modesetting driver both require KMS to be enabled.
+</Info>
+
+## Verifying the DRM device
+
+```bash
+# List DRM devices
+ls /dev/dri/
+
+# Check which driver owns a card
+cat /sys/class/drm/card0/device/driver/module/holders
+```

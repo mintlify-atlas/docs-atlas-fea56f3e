@@ -1,0 +1,94 @@
+---
+title: "Introduction"
+description: "An overview of the NVIDIA Open GPU Kernel Modules — what they are, which GPUs they support, and how they fit into the full NVIDIA driver stack."
+---
+
+The NVIDIA Open GPU Kernel Modules project publishes the source code for NVIDIA's Linux kernel modules under a dual MIT/GPLv2 license. Starting with the Turing architecture (RTX 2000 series), all four core kernel modules are available as open source, enabling community inspection, contributions, and customization of the GPU driver stack.
+
+<Info>
+  The current release is version **595.58.03**. Kernel modules built from this source must be paired with user-space components and GSP firmware from the same 595.58.03 driver release.
+</Info>
+
+## What the open kernel modules are
+
+The open kernel modules are a source-available replacement for the binary kernel modules that NVIDIA has historically shipped in its proprietary Linux GPU driver. They implement the same interfaces and expose the same functionality, but their source code is publicly readable and modifiable.
+
+The open modules are **not** a standalone driver. They are the kernel-space portion of the NVIDIA driver stack and must be used together with matching user-space components (the CUDA runtime, OpenGL libraries, management tools, and so on) and GSP firmware from a corresponding NVIDIA driver release.
+
+<Note>
+  The open kernel modules share their code base with NVIDIA's proprietary driver. NVIDIA processes the shared internal code before publishing it here, which means the GitHub repository typically contains one commit per driver release rather than a full revision history.
+</Note>
+
+## Dual licensing
+
+The open kernel modules are released under a dual **MIT / GPLv2** license. You may use, modify, and distribute them under either license. This dual licensing ensures compatibility with the Linux kernel's GPLv2 requirements while also permitting use in MIT-licensed contexts.
+
+## The four kernel modules
+
+<CardGroup cols={2}>
+  <Card title="nvidia.ko" icon="microchip" href="/modules/nvidia-ko">
+    The core module. Manages GPU initialization, memory, context management, and communication with GSP firmware. This is the largest and most complex of the four modules.
+  </Card>
+  <Card title="nvidia-drm.ko" icon="display" href="/modules/nvidia-drm">
+    The Direct Rendering Manager integration layer. Implements the Linux DRM/KMS interfaces used by the display stack, Wayland compositors, and GBM-based applications.
+  </Card>
+  <Card title="nvidia-modeset.ko" icon="sliders" href="/modules/nvidia-modeset">
+    Handles display mode-setting, output configuration, and timing. Works alongside nvidia-drm.ko to manage monitor detection and resolution negotiation.
+  </Card>
+  <Card title="nvidia-uvm.ko" href="/modules/nvidia-uvm" icon="memory">
+    Implements the Unified Virtual Memory subsystem. Provides the kernel interface used by CUDA for managed memory, enabling automatic data migration between CPU and GPU memory.
+  </Card>
+</CardGroup>
+
+### OS-agnostic and kernel interface components
+
+Each module is split into two layers:
+
+- **OS-agnostic component** — contains logic that is independent of the Linux kernel version. For `nvidia.ko` this is `nv-kernel.o_binary`; for `nvidia-modeset.ko` it is `nv-modeset-kernel.o_binary`. `nvidia-drm.ko` and `nvidia-uvm.ko` have no OS-agnostic component.
+- **Kernel interface layer** — the portion that must be compiled against your specific kernel. This is what you build from source in the `kernel-open/` directory.
+
+When you build from source, you compile the kernel interface layer. The OS-agnostic binary is linked in during the build.
+
+## Supported Linux kernel versions
+
+The open kernel modules support the same range of Linux kernel versions as the proprietary NVIDIA kernel modules: **Linux kernel 4.15 or newer**.
+
+## Supported CPU architectures
+
+You can build the modules for **x86_64** or **aarch64**. Cross-compilation is supported by setting `TARGET_ARCH`, `CC`, `LD`, `AR`, `CXX`, and `OBJCOPY` on the `make` command line. See the [cross-compilation guide](/building/cross-compilation) for details.
+
+## Relationship to user-space components and GSP firmware
+
+<Warning>
+  The open kernel modules require **GSP (GPU System Processor) firmware** and user-space driver components from a matching driver release. Mismatched versions will prevent the driver from loading correctly.
+</Warning>
+
+The NVIDIA driver stack has three layers:
+
+1. **Kernel modules** (this project) — loaded into the Linux kernel, communicate with the GPU hardware and with GSP firmware running on the GPU itself.
+2. **GSP firmware** — firmware that runs on a dedicated processor inside the GPU, offloading tasks that were traditionally handled by the kernel driver. The firmware image is distributed as part of the NVIDIA driver `.run` package.
+3. **User-space components** — libraries (CUDA, OpenGL, Vulkan), management tools (`nvidia-smi`), and the display driver. Installed separately using the NVIDIA `.run` installer with `--no-kernel-modules`.
+
+Because the open modules depend on the GSP firmware interface, they cannot be mixed with firmware or user-space components from a different driver version. See the [GSP firmware architecture page](/architecture/gsp-firmware) for a deeper explanation.
+
+## Compatible GPUs
+
+The open kernel modules work on any **Turing or later** GPU architecture. This includes:
+
+| Architecture | Examples |
+|---|---|
+| Turing (2018) | GeForce RTX 2000 series, Quadro RTX, Tesla T4 |
+| Ampere (2020) | GeForce RTX 3000 series, RTX A-series, A100, A30 |
+| Ada Lovelace (2022) | GeForce RTX 4000 series, RTX 4000/6000 Ada |
+| Hopper (2022) | H100, H200, GH200 |
+| Blackwell | B-series products |
+
+<Note>
+  A complete table of supported PCI device IDs is available in the [README on GitHub](https://github.com/NVIDIA/open-gpu-kernel-modules#compatible-gpus). If your GPU's PCI ID is not listed there, it is not supported by the open modules.
+</Note>
+
+Pre-Turing GPUs (Pascal, Volta, and earlier) are not supported. For those GPUs, use the proprietary NVIDIA driver package.
+
+### vGPU support
+
+For virtual GPU (vGPU) use cases, refer to the README.vgpu document included in the NVIDIA vGPU Host Package. vGPU support has additional requirements beyond those described here.

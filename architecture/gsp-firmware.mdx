@@ -1,0 +1,144 @@
+---
+title: "GSP Firmware"
+description: "The GPU System Processor: the embedded processor that enables NVIDIA's open-source kernel module architecture."
+---
+
+GSP — the **GPU System Processor** — is an embedded RISC-V processor present on all Turing and later NVIDIA GPUs. By offloading much of the driver's traditional CPU-side workload to run directly on the GPU, GSP makes the open-source kernel module architecture practical: the portion of the driver that remains on the CPU is small and clean enough to publish and maintain as open source.
+
+<Note>
+GSP firmware is **not** included in this repository. It is packaged with the NVIDIA GPU driver and distributed as part of the `.run` installer. The open kernel modules require GSP firmware from a **matching driver release** (currently `595.58.03`).
+</Note>
+
+## What GSP does
+
+On Turing+ GPUs, GSP takes over a large portion of what was previously done by the CPU-side Resource Manager:
+
+<CardGroup cols={2}>
+  <Card title="GPU Initialization">
+    GSP sequences the full hardware bring-up of the GPU, including engine initialization, BAR setup, and internal bus configuration — work that previously ran entirely on the CPU.
+  </Card>
+  <Card title="Power Management">
+    Clock management, voltage scaling, power gating, and P-state transitions are orchestrated by GSP. The CPU driver sends requests; GSP executes them against the hardware.
+  </Card>
+  <Card title="ECC Memory Scrubbing">
+    Error Correcting Code (ECC) scrubbing of video memory is performed by GSP, removing a significant source of CPU-side latency during memory allocation and context switches.
+  </Card>
+  <Card title="Resource Manager Operations">
+    Many RM control calls that previously ran on the CPU — engine state queries, memory management operations, fault handling — are now executed by GSP RM firmware, with the CPU driver acting as a client.
+  </Card>
+</CardGroup>
+
+## The architecture split
+
+With GSP, driver responsibilities are divided across three layers:
+
+```
+┌─────────────────────────────────────────┐
+│           User Space                    │
+│  (CUDA runtime, OpenGL, Vulkan, ...)    │
+└────────────────┬────────────────────────┘
+                 │ ioctl
+┌────────────────▼────────────────────────┐
+│        Kernel Interface Layer           │  ← kernel-open/ (this repo, MIT/GPLv2)
+│  PCI, DMA, interrupts, mmap, procfs     │
+└────────────────┬────────────────────────┘
+                 │ RPC over shared memory
+┌────────────────▼────────────────────────┐
+│           GSP Firmware (RM)             │  ← .run package, runs on GPU's RISC-V
+│  Init, power, ECC, clocks, RM ops       │
+└─────────────────────────────────────────┘
+```
+
+The open kernel modules handle the Linux kernel interface. GSP firmware handles GPU-side operations. The two communicate through an RPC channel over a region of shared memory.
+
+## How GSP firmware is loaded
+
+GSP firmware is delivered as a binary image alongside the driver and loaded by the kernel module at driver initialization time using the standard Linux firmware loading mechanism.
+
+<Steps>
+  <Step title="Driver loads">
+    When `nvidia.ko` is loaded, the kernel interface layer initializes PCI and sets up the basic GPU register mappings.
+  </Step>
+  <Step title="Firmware request">
+    The driver calls `request_firmware()` to ask the kernel to locate the GSP firmware image. The kernel searches standard firmware paths (e.g., `/lib/firmware/nvidia/`).
+  </Step>
+  <Step title="Firmware upload">
+    The firmware binary is uploaded to the GPU through a dedicated secure region of video memory that is write-protected from the CPU once loading is complete (WPR — Write Protected Region).
+  </Step>
+  <Step title="GSP boot">
+    The CPU driver releases the GSP processor from reset and waits for a boot handshake. GSP initializes itself, starts the on-GPU Resource Manager, and signals readiness.
+  </Step>
+  <Step title="RPC channel established">
+    After boot, the CPU driver and GSP communicate exclusively through message queues in a shared memory region. The CPU driver is now a client of the GSP RM.
+  </Step>
+</Steps>
+
+## RPC communication
+
+The driver-to-GSP interface is built around Remote Procedure Calls (RPCs). When the CPU-side driver needs GSP to perform an operation, it serializes the request into a message queue entry and signals GSP. GSP executes the operation and writes the result back to a status queue.
+
+The message queue structures are defined in `src/nvidia/inc/kernel/gpu/gsp/`:
+
+```c
+/* Initialization arguments for the GSP message queue (gsp_init_args.h) */
+typedef struct {
+    NvU64    sharedMemPhysAddr;   /* physical address of the shared memory region */
+    NvU32    pageTableEntryCount;
+    NvLength cmdQueueOffset;      /* offset of the command queue within shared mem */
+    NvLength statQueueOffset;     /* offset of the status queue within shared mem */
+    NvLength queueElementHdrSize;
+    NvLength queueElementSizeMin;
+    NvLength queueElementSizeMax;
+    NvU32    queueHeaderAlign;
+    NvU32    queueElementAlign;
+} MESSAGE_QUEUE_INIT_ARGUMENTS;
+```
+
+The CPU-side API for sending and receiving messages (`message_queue.h`):
+
+```c
+/* Send a command to GSP and receive its response */
+NV_STATUS GspMsgQueueSendCommand(MESSAGE_QUEUE_INFO *pMQI, OBJGPU *pGpu);
+NV_STATUS GspMsgQueueReceiveStatus(MESSAGE_QUEUE_INFO *pMQI, OBJGPU *pGpu);
+```
+
+The `src/nvidia/inc/kernel/gpu/gsp/` directory contains the full CPU-side GSP communication layer, including:
+
+| File | Purpose |
+|------|---------|
+| `gsp_init_args.h` | Initialization argument structures passed to GSP at boot |
+| `gsp_static_config.h` | Static GPU configuration fetched from GSP after init |
+| `message_queue.h` | RPC message queue API |
+| `message_queue_priv.h` | Internal queue state structures |
+| `gsp_fw_heap.h` | GSP firmware heap management |
+
+## Version matching
+
+<Warning>
+The open kernel modules **must** be used with GSP firmware from the **same driver release**. The RPC interface between the CPU driver and GSP firmware is not stable across versions. Using mismatched versions will prevent the GPU from initializing and may cause system instability.
+
+Currently required GSP firmware version: **595.58.03**
+
+Install the matching NVIDIA driver using the `--no-kernel-modules` flag so that the correct firmware is placed in `/lib/firmware/nvidia/` without overwriting your custom-built kernel modules:
+
+```bash
+sh ./NVIDIA-Linux-x86_64-595.58.03.run --no-kernel-modules
+```
+</Warning>
+
+## GSP static configuration
+
+After GSP boots, the CPU driver retrieves a snapshot of static GPU configuration via the `NV_RM_RPC_GET_GSP_STATIC_INFO()` call. This structure (`GspStaticConfigInfo_t` in `gsp_static_config.h`) carries information that was previously queried directly from hardware by the CPU, including GPU identification, BIOS data, framebuffer topology, and PCI link capabilities.
+
+## Nouveau integration
+
+GSP firmware is also used by the open-source Nouveau driver. The `nouveau/` directory in this repository contains a Python script that extracts firmware binary images and their associated metadata from the source code, storing them as discrete files for Nouveau to consume.
+
+<CardGroup cols={2}>
+  <Card title="Nouveau Integration" href="/integration/nouveau">
+    How the Nouveau driver loads and communicates with GSP firmware extracted from the NVIDIA driver package
+  </Card>
+  <Card title="OS-Agnostic Component" href="/architecture/os-agnostic">
+    The CPU-side Resource Manager that acts as the GSP client
+  </Card>
+</CardGroup>

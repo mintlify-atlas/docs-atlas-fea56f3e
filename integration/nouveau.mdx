@@ -1,0 +1,168 @@
+---
+title: "Nouveau Driver Integration"
+description: "How the open-source Nouveau driver uses GSP firmware extracted from the NVIDIA open kernel modules to enable hardware-accelerated support on Turing+ GPUs."
+keywords: ["nouveau", "gsp firmware", "extract-firmware-nouveau", "linux firmware", "open kernel modules"]
+---
+
+The open-source Nouveau driver can use GSP firmware extracted directly from the NVIDIA Open GPU Kernel Modules source tree. This enables hardware-accelerated support for Turing and later GPU architectures under the upstream Linux kernel driver.
+
+<Info>
+Nouveau is the open-source reverse-engineered Linux kernel driver for NVIDIA GPUs, developed independently by the Linux kernel community. The firmware extraction workflow described here is a collaboration between NVIDIA and the Nouveau project, allowing Nouveau to use the same GSP firmware images that the NVIDIA open kernel modules rely on.
+</Info>
+
+<Note>
+Nouveau's GSP firmware support is entirely separate from the NVIDIA proprietary driver stack. Loading Nouveau and the NVIDIA driver at the same time is not supported. The firmware files described here are used only by Nouveau, not by `nvidia.ko`.
+</Note>
+
+## What GSP firmware enables for Nouveau
+
+GSP-RM (GPU System Processor Resource Manager) runs on the dedicated RISC-V processor embedded in Turing and later NVIDIA GPUs. When Nouveau loads GSP firmware, it offloads the bulk of GPU resource management to that processor, enabling:
+
+- Hardware-accelerated 3D and compute on Turing+ GPUs (TU10x and later)
+- Display output and modesetting on Turing+ hardware
+- Feature parity with the functionality GSP provides to the NVIDIA open kernel modules
+
+Without GSP firmware, Nouveau on Turing+ GPUs falls back to a severely limited software path with no hardware acceleration.
+
+## Firmware sources
+
+Nouveau requires two separate sets of firmware images, obtained from two different locations:
+
+<AccordionGroup>
+  <Accordion title="GSP-RM binary (from the .run installer)">
+    The GSP-RM application firmware itself is extracted from NVIDIA's proprietary Linux installer package (`NVIDIA-Linux-x86_64-<version>.run`). Typically two images are produced:
+
+    - `gsp_tu10x.bin` — for TU10x and GA100 GPUs
+    - `gsp_ga10x.bin` — for GA102 and later GPUs
+
+    These images are tens of megabytes in size and are submitted by NVIDIA to the `linux-firmware` git repository at [gitlab.com/kernel-firmware/linux-firmware](https://gitlab.com/kernel-firmware/linux-firmware).
+  </Accordion>
+  <Accordion title="Auxiliary firmware images (from this repository)">
+    Several smaller firmware images and metadata blobs are extracted from the C source files in this git repository. These include:
+
+    - **Bootloader** (`bootloader-<version>.bin`) — GSP bootloader image
+    - **Generic bootloader** (`gen_bootloader-<version>.bin`) — Falcon bootloader used on TU10x and GA100
+    - **Booter load/unload** (`booter_load-<version>.bin`, `booter_unload-<version>.bin`) — secure boot helper images
+    - **FMC** (`fmc-<version>.bin`) — Firmware Management Controller image for Hopper and Blackwell, packaged as an ELF with `hash`, `signature`, `publickey`, and `image` sections
+    - **Scrubber** (`scrubber-<version>.bin`) — GPU memory scrubber for Ada Lovelace (not currently used by Nouveau)
+
+    The git repository uses version tags to identify each release. To generate firmware for a specific version, check out the corresponding tag before running the extraction script.
+  </Accordion>
+</AccordionGroup>
+
+## The extract-firmware-nouveau.py script
+
+`nouveau/extract-firmware-nouveau.py` reads the binhex-encoded firmware data embedded in the OpenRM C source files and writes them out as standalone binary files in the format Nouveau expects.
+
+The script handles:
+
+- **Parsing** — scans generated C source files for `BINDATA_CONST NvU8` arrays and struct definitions, reading compression metadata from the preceding comment block
+- **Decompression** — data tagged `COMPRESSION: YES` is decompressed using gzip after prepending a synthetic gzip header
+- **Binary assembly** — constructs `nvfw_bin_hdr`, `nvfw_hs_header_v2`, and `nvfw_hs_load_header_v2` headers, then appends signature blobs and firmware payloads in the correct order
+- **ELF packaging** — FMC firmware is wrapped in a 32-bit ELF image with named sections (`hash`, `signature`, `publickey`, `image`), each carrying a CRC-32 checksum in the `sh_info` field
+- **Symlink generation** — creates the directory tree and symlinks that mirror the WHENCE layout expected by `/lib/firmware`
+- **WHENCE generation** — optionally produces a WHENCE text fragment ready for submission to the `linux-firmware` repository
+
+### Usage
+
+<Steps>
+  <Step title="Check out the desired version tag">
+    ```bash
+    git checkout 570.144
+    ```
+
+    Then restore the latest version of the script so you get any fixes made after the tag:
+
+    ```bash
+    git checkout main -- nouveau/extract-firmware-nouveau.py
+    ```
+  </Step>
+  <Step title="Run the extraction script">
+    The recommended invocation extracts auxiliary images, downloads the matching `.run` file automatically, and creates all required symlinks:
+
+    ```bash
+    sudo python3 nouveau/extract-firmware-nouveau.py -o /lib/firmware -s -d
+    ```
+
+    | Option | Description |
+    | ------ | ----------- |
+    | `-i INPUT` | Path to the source directory (default: current directory) |
+    | `-o OUTPUT` | Target directory where files are written (default: `./_out`) |
+    | `-r REVISION` | Override the version string used in output file names |
+    | `-d [DRIVER]` | Path or URL to a `.run` installer; omit the value to auto-download |
+    | `-s` | Create symlinks for all supported GPU variants |
+    | `-w` | Generate a `WHENCE.txt` fragment for the `linux-firmware` repository |
+    | `--debug-fused` | Extract debug-fused images (NVIDIA internal use only) |
+  </Step>
+  <Step title="Verify the output">
+    After the script completes, the target directory contains a tree like:
+
+    ```
+    nvidia/
+      tu102/gsp/
+        gen_bootloader-570.144.bin
+        bootloader-570.144.bin
+        booter_load-570.144.bin
+        booter_unload-570.144.bin
+        gsp-570.144.bin
+      tu104/gsp -> ../tu102/gsp
+      tu106/gsp -> ../tu102/gsp
+      tu116/gsp/
+        booter_load-570.144.bin
+        booter_unload-570.144.bin
+        bootloader-570.144.bin  -> ../../tu102/gsp/bootloader-570.144.bin
+        gsp-570.144.bin         -> ../../tu102/gsp/gsp-570.144.bin
+      ga102/gsp/
+        bootloader-570.144.bin
+        booter_load-570.144.bin
+        booter_unload-570.144.bin
+        gsp-570.144.bin
+      ad102/gsp/
+        bootloader-570.144.bin
+        booter_load-570.144.bin
+        booter_unload-570.144.bin
+        scrubber-570.144.bin
+        gsp-570.144.bin         -> ../../ga102/gsp/gsp-570.144.bin
+      gh100/gsp/
+        bootloader-570.144.bin
+        fmc-570.144.bin
+        gsp-570.144.bin         -> ../../ga102/gsp/gsp-570.144.bin
+      gb100/gsp/
+        bootloader-570.144.bin
+        fmc-570.144.bin
+        gsp-570.144.bin         -> ../../ga102/gsp/gsp-570.144.bin
+      gb202/gsp/
+        bootloader-570.144.bin
+        fmc-570.144.bin
+        gsp-570.144.bin         -> ../../ga102/gsp/gsp-570.144.bin
+    ```
+
+    Symlinks for variant GPUs (tu104, tu106, ga103, ga104, ad103, ad104, gb102, gb203, …) point to the canonical GPU directory for their family.
+  </Step>
+</Steps>
+
+## Firmware file layout reference
+
+The `nouveau_firmware_layout.ods` file in the root of this repository is an OpenDocument Spreadsheet (compatible with LibreOffice Calc, Google Sheets, and other spreadsheet applications). It documents the exact binary layout of each firmware file type that the script produces, including field offsets, sizes, and expected values for the `nvfw_bin_hdr` and related headers.
+
+## Where to place the firmware files
+
+Nouveau loads firmware through the standard Linux firmware loading framework. Files must be placed under `/lib/firmware/nvidia/` with the directory structure shown above. Running the script with `-o /lib/firmware` as root installs them directly to the correct location.
+
+After installation, the kernel will find the images at paths such as:
+
+```
+/lib/firmware/nvidia/tu102/gsp/gsp-570.144.bin
+/lib/firmware/nvidia/ga102/gsp/bootloader-570.144.bin
+```
+
+The Nouveau driver uses the file names to identify the firmware version. Each supported version of Nouveau is programmed to load specific version-stamped file names — the GSP-RM ABI is not stable across NVIDIA driver versions, so you cannot substitute a different firmware version without also updating Nouveau itself.
+
+<CardGroup cols={2}>
+  <Card title="GSP firmware architecture" icon="microchip" href="/architecture/gsp-firmware">
+    How GSP-RM interacts with the kernel modules at runtime.
+  </Card>
+  <Card title="nvidia-uvm module" icon="layers" href="/modules/nvidia-uvm">
+    UVM kernel module overview and device files.
+  </Card>
+</CardGroup>

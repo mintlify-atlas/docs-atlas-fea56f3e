@@ -1,97 +1,66 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "NVIDIA Open GPU Kernel Modules"
+description: "Open-source Linux kernel modules for NVIDIA Turing and later GPUs — build, install, and extend the GPU driver stack."
 ---
 
-## Setting up
+The NVIDIA Open GPU Kernel Modules project provides the source code for NVIDIA's Linux kernel modules, enabling transparency, community contributions, and customization of the GPU driver stack. Starting with the Turing architecture, all four core kernel modules are available as open source under a dual MIT/GPLv2 license.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    Learn what the open kernel modules are, which GPUs are supported, and how they relate to the full driver stack.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Build and install the kernel modules on your system in minutes.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Building" icon="hammer" href="/building/build-from-source">
+    Explore build options, cross-compilation, toolchain requirements, and DKMS integration.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Kernel Modules" icon="microchip" href="/modules/overview">
+    Understand each module — nvidia.ko, nvidia-drm.ko, nvidia-modeset.ko, and nvidia-uvm.ko.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Get up and running
 
-Everything you need to create world-class documentation.
+<Steps>
+  <Step title="Check your GPU">
+    Verify your GPU is Turing (RTX 2000 series) or newer. See the [compatible GPUs list](/introduction#compatible-gpus).
+  </Step>
+  <Step title="Install prerequisites">
+    Install kernel headers, GCC or Clang, and `make` for your Linux distribution.
+  </Step>
+  <Step title="Build the modules">
+    ```bash
+    make modules -j$(nproc)
+    ```
+  </Step>
+  <Step title="Install the modules">
+    Install the user-space driver components first, then install the open kernel modules:
+    ```bash
+    sudo make modules_install -j$(nproc)
+    ```
+  </Step>
+</Steps>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## Explore the documentation
 
-## Need inspiration?
-
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<CardGroup cols={2}>
+  <Card title="Architecture overview" icon="sitemap" href="/architecture/kernel-interface">
+    Understand the split between the OS-agnostic component and the kernel interface layer.
+  </Card>
+  <Card title="GSP firmware" icon="server" href="/architecture/gsp-firmware">
+    Learn how GPU System Processor firmware offloads driver tasks to on-GPU firmware.
+  </Card>
+  <Card title="Nouveau integration" icon="puzzle-piece" href="/integration/nouveau">
+    Extract and use GSP firmware for the open-source Nouveau driver.
+  </Card>
+  <Card title="GPUDirect peer memory" icon="network-wired" href="/integration/peer-memory">
+    Enable direct peer-to-peer GPU memory access for RDMA and high-performance interconnects.
+  </Card>
+  <Card title="UVM API" icon="memory" href="/integration/uvm-api">
+    Reference for the Unified Virtual Memory kernel interface used by CUDA.
+  </Card>
+  <Card title="Contributing" icon="code-pull-request" href="/contributing/guidelines">
+    Learn how to contribute code changes and report issues.
+  </Card>
+</CardGroup>

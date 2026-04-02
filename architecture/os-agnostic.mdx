@@ -1,0 +1,145 @@
+---
+title: "OS-Agnostic Component"
+description: "The GPU Resource Manager: hardware abstraction at the core of NVIDIA's open kernel modules."
+---
+
+The OS-agnostic component is the GPU Resource Manager (RM) — the large, hardware-facing core of each NVIDIA kernel module. It is called "OS-agnostic" because it contains no Linux-specific code; all operating system services it needs are accessed through the [os-interface abstraction](/architecture/kernel-interface#the-os-interface-abstraction).
+
+## Why separate it?
+
+The Resource Manager is orders of magnitude larger than the kernel interface layer and takes significant time to compile. Keeping it OS-neutral means the same compiled binary can work unchanged across kernel versions — only the thin kernel interface layer needs to be rebuilt when the kernel changes.
+
+<Note>
+In the open-source repository, the full C source for the OS-agnostic component is published under `src/`. When NVIDIA ships the `.run` driver installer, the OS-agnostic component is instead provided as pre-built binary object files so users do not have to compile it during driver installation. The open-source release is what this documentation describes.
+</Note>
+
+## Source locations
+
+```
+src/
+├── nvidia/          # OS-agnostic code for nvidia.ko
+├── nvidia-modeset/  # OS-agnostic code for nvidia-modeset.ko
+└── common/          # Shared utility code used by one or more of the above
+```
+
+<Tabs>
+  <Tab title="nvidia.ko">
+    The Resource Manager for the core driver lives in `src/nvidia/`. This is the largest component in the repository, implementing GPU initialization, memory management, command scheduling, display, power management, and much more.
+
+    In the `.run` installer package, this compiles to **`nv-kernel.o_binary`**, which is linked with the kernel interface layer to produce `nvidia.ko`.
+  </Tab>
+  <Tab title="nvidia-modeset.ko">
+    The display mode-setting stack lives in `src/nvidia-modeset/`. It implements NVIDIA's internal NVKMS (Kernel Mode Setting) API, sitting between the DRM/KMS layer and the display hardware.
+
+    In the `.run` installer package, this compiles to **`nv-modeset-kernel.o_binary`**, which is linked with the modeset kernel interface layer to produce `nvidia-modeset.ko`.
+  </Tab>
+  <Tab title="nvidia-drm.ko / nvidia-uvm.ko">
+    Neither `nvidia-drm.ko` nor `nvidia-uvm.ko` have OS-agnostic components. They are built entirely from the kernel interface layer code in `kernel-open/nvidia-drm/` and `kernel-open/nvidia-uvm/` respectively.
+  </Tab>
+</Tabs>
+
+## The Resource Manager
+
+The Resource Manager is responsible for the full lifecycle of GPU resources. It abstracts over every generation of NVIDIA GPU hardware through a Hardware Abstraction Layer (HAL), presenting a unified API to the rest of the driver stack.
+
+High-level RM responsibilities include:
+
+- **GPU hardware initialization** — sequencing the bring-up of every engine on the chip
+- **Power management** — controlling GPU power states, DVFS, and clock gating
+- **Memory management** — allocating and tracking video memory, system memory mappings, and page tables
+- **Engine scheduling** — managing command queues (channels) for compute, graphics, video, and copy engines
+- **Display** — programming the display pipeline from framebuffer through encoder
+- **Security** — enforcing isolation between clients and managing confidential compute features
+- **GSP communication** — on Turing+ GPUs, delegating most of the above to GSP firmware via RPC
+
+## Key subsystems
+
+The `src/nvidia/inc/kernel/` directory tree reflects the RM's internal subsystem boundaries:
+
+<CardGroup cols={2}>
+  <Card title="gpu/" href="/modules/nvidia-ko">
+    GPU core and per-GPU object (`OBJGPU`). Owns overall GPU state, the HAL dispatch tables, engine descriptors, and GPU-level power and reset sequences.
+  </Card>
+  <Card title="mem_mgr/" href="/modules/nvidia-ko">
+    Video and system memory management. Handles heap allocation, memory mapping descriptors, page table management, and NUMA-aware allocation.
+  </Card>
+  <Card title="fifo/" href="/modules/nvidia-ko">
+    Command queue and channel management. Schedules work to GPU engines via host FIFO, manages channel objects, and handles preemption.
+  </Card>
+  <Card title="disp/" href="/modules/nvidia-modeset">
+    Display engine control. Manages heads, windows, CRTCs, connectors, and the full display pipeline. Works alongside `nvidia-modeset.ko`.
+  </Card>
+  <Card title="ce/" href="/modules/nvidia-ko">
+    Copy engines. Manages DMA copy engine channels used for memory transfers within and across GPUs.
+  </Card>
+  <Card title="gr/" href="/modules/nvidia-ko">
+    Graphics and compute engine. Manages GPC/TPC topology, context switching, golden context image setup, and compute partition management.
+  </Card>
+  <Card title="mig_mgr/" href="/modules/nvidia-ko">
+    Multi-Instance GPU (MIG) management. Partitions Ampere+ GPUs into isolated compute instances with dedicated memory and engine slices.
+  </Card>
+  <Card title="gsp/" href="/architecture/gsp-firmware">
+    CPU-side GSP communication layer. Manages firmware loading, RPC message queues, and the boot handshake with GSP firmware.
+  </Card>
+</CardGroup>
+
+## The HAL pattern
+
+Hardware-specific behavior in the RM is dispatched through function tables rather than `#ifdef` chains. Each GPU chip family provides its own implementation of each HAL interface; at runtime the RM selects the correct table based on the detected chip.
+
+The pattern is called **halspec** and is defined in `src/nvidia/inc/kernel/gpu/gpu_halspec.h`. A simplified illustration:
+
+```c
+/* Each engine has a "hal" struct of function pointers */
+typedef struct {
+    NV_STATUS (*fifoConstructHal)(OBJGPU *, struct KernelFifo *);
+    NV_STATUS (*fifoGetMaxChannelGroupsInSystem)(OBJGPU *, struct KernelFifo *, NvU32 *);
+    /* ... many more entries ... */
+} KernelFifo_STATIC_FUNCTIONS;
+
+/* At GPU init time, the RM fills the table for the detected chip */
+kfifoSetupHal(pGpu, pKernelFifo);
+```
+
+This allows a single compiled binary to run correctly on every supported GPU generation — from Turing through Blackwell — without any branching in the main code paths.
+
+## Build and distribution
+
+The OS-agnostic component is compiled using a separate build pass that does not require a kernel source tree. It produces standard ELF `.o` files that are subsequently linked with the kernel interface layer during `make modules`.
+
+In the open-source repository:
+
+```bash
+# Full build: compiles both the OS-agnostic component and the kernel interface layer
+make modules -j$(nproc)
+```
+
+When NVIDIA distributes a `.run` installer, this separate compilation step has already been done:
+
+```
+NVIDIA-Linux-x86_64-595.58.03.run
+├── nv-kernel.o_binary        ← pre-built OS-agnostic component for nvidia.ko
+├── nv-modeset-kernel.o_binary← pre-built OS-agnostic component for nvidia-modeset.ko
+└── kernel-open/              ← kernel interface layer source (compiled on install)
+```
+
+<Note>
+The `.o_binary` files shipped in the installer are built from the same source published in this repository. The open-source release exists so that the entire driver — including the Resource Manager — can be inspected, audited, and compiled from scratch.
+</Note>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Kernel Interface Layer" href="/architecture/kernel-interface">
+    The Linux-specific layer that wraps the OS-agnostic component
+  </Card>
+  <Card title="GSP Firmware" href="/architecture/gsp-firmware">
+    The on-GPU processor that offloads RM operations on Turing+ GPUs
+  </Card>
+  <Card title="nvidia.ko" href="/modules/nvidia-ko">
+    The kernel module that packages the OS-agnostic RM with the kernel interface layer
+  </Card>
+  <Card title="nvidia-modeset.ko" href="/modules/nvidia-modeset">
+    The display module powered by the modeset OS-agnostic component
+  </Card>
+</CardGroup>

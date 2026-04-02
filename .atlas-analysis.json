@@ -1,0 +1,87 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "NVIDIA Open GPU Kernel Modules",
+  "projectDescription": "Open-source NVIDIA Linux GPU kernel module source for Turing and later GPUs, including nvidia.ko, nvidia-drm.ko, nvidia-modeset.ko, and nvidia-uvm.ko.",
+  "theme": "aspen",
+  "primaryColor": "#5b910c",
+  "lightColor": "#9db697",
+  "darkColor": "#ebefe8",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": ["introduction", "quickstart"]
+          },
+          {
+            "group": "Building",
+            "pages": [
+              "building/build-from-source",
+              "building/cross-compilation",
+              "building/dkms"
+            ]
+          },
+          {
+            "group": "Kernel Modules",
+            "pages": [
+              "modules/overview",
+              "modules/nvidia-ko",
+              "modules/nvidia-drm",
+              "modules/nvidia-modeset",
+              "modules/nvidia-uvm"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/kernel-interface",
+              "architecture/os-agnostic",
+              "architecture/gsp-firmware"
+            ]
+          },
+          {
+            "group": "Integration",
+            "pages": [
+              "integration/nouveau",
+              "integration/peer-memory",
+              "integration/uvm-api"
+            ]
+          },
+          {
+            "group": "Contributing",
+            "pages": [
+              "contributing/guidelines",
+              "contributing/security"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Open-source Linux kernel modules for NVIDIA Turing and later GPUs",
+    "Four kernel modules: nvidia.ko (core), nvidia-drm.ko (DRM/KMS), nvidia-modeset.ko (display), nvidia-uvm.ko (unified memory)",
+    "Split architecture: OS-agnostic component and kernel interface layer",
+    "GSP firmware-based GPU management",
+    "DKMS support for automatic kernel module rebuilding",
+    "Cross-compilation support for x86_64 and aarch64",
+    "Nouveau device driver integration for firmware extraction",
+    "Peer memory (GPUDirect) support via nvidia-peermem module",
+    "Unified Virtual Memory (UVM) for CPU-GPU memory coherence"
+  ],
+  "publicApiSurface": [
+    "make modules (build kernel modules)",
+    "make modules_install (install kernel modules)",
+    "NV_VERBOSE=1 (verbose build output)",
+    "DEBUG=1 (debug build with logging)",
+    "TARGET_ARCH=aarch64|x86_64 (cross-compilation target)",
+    "nvidia-uvm ioctl API (uvm_ioctl.h)",
+    "nvidia-modeset NVKMS kernel API (nvkms-kapi.h)",
+    "nv_uvm_interface.h (UVM-RM interface)",
+    "nv-p2p.h (GPUDirect peer-to-peer API)",
+    "nvidia-drm DRM/KMS interface",
+    "extract-firmware-nouveau.py (Nouveau firmware extraction)"
+  ]
+}

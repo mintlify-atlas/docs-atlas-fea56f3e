@@ -1,0 +1,110 @@
+---
+title: "Kernel Modules Overview"
+description: "An introduction to the four NVIDIA open GPU kernel modules, their roles, source layout, and how to verify they are loaded."
+---
+
+The NVIDIA open GPU kernel module stack is composed of four distinct Linux kernel modules. Each module handles a well-defined layer of GPU functionality, from low-level hardware management to display output and unified memory.
+
+<CardGroup cols={2}>
+  <Card title="nvidia.ko" href="/modules/nvidia-ko">
+    Core GPU driver. Manages hardware, PCIe, memory, power, and exposes the Resource Manager (RM) interface to other modules.
+  </Card>
+  <Card title="nvidia-drm.ko" href="/modules/nvidia-drm">
+    Direct Rendering Manager integration. Implements the Linux DRM/KMS subsystem interface for display management.
+  </Card>
+  <Card title="nvidia-modeset.ko" href="/modules/nvidia-modeset">
+    NVIDIA Kernel Mode Setting engine (NVKMS). Manages scanout, display configuration, EDID negotiation, and HDR.
+  </Card>
+  <Card title="nvidia-uvm.ko" href="/modules/nvidia-uvm">
+    Unified Virtual Memory. Enables transparent CPU–GPU memory sharing and powers CUDA unified memory.
+  </Card>
+</CardGroup>
+
+## Directory structure
+
+Each module's kernel interface layer lives under `kernel-open/`. The OS-agnostic components for `nvidia.ko` and `nvidia-modeset.ko` live under `src/`.
+
+| Source path | Kernel module |
+|---|---|
+| `kernel-open/nvidia/` | `nvidia.ko` — kernel interface layer |
+| `kernel-open/nvidia-drm/` | `nvidia-drm.ko` — kernel interface layer |
+| `kernel-open/nvidia-modeset/` | `nvidia-modeset.ko` — kernel interface layer |
+| `kernel-open/nvidia-uvm/` | `nvidia-uvm.ko` — kernel interface layer |
+| `src/nvidia/` | `nvidia.ko` — OS-agnostic component |
+| `src/nvidia-modeset/` | `nvidia-modeset.ko` — OS-agnostic component |
+| `src/common/` | Shared utility code for `nvidia.ko` and `nvidia-modeset.ko` |
+
+<Note>
+`nvidia-drm.ko` and `nvidia-uvm.ko` have no OS-agnostic component — they are pure kernel interface layer modules compiled entirely from source.
+</Note>
+
+## Module dependencies and loading order
+
+The modules must be loaded in dependency order. `nvidia.ko` provides the core RM interface that all other modules depend on.
+
+```
+nvidia.ko  ──┬──► nvidia-modeset.ko ──► nvidia-drm.ko
+             └──► nvidia-uvm.ko
+```
+
+<Steps>
+  <Step title="Load nvidia.ko first">
+    The core driver must be loaded before any other NVIDIA module.
+
+    ```bash
+    modprobe nvidia
+    ```
+  </Step>
+  <Step title="Load nvidia-modeset.ko">
+    Required by `nvidia-drm.ko` for display support.
+
+    ```bash
+    modprobe nvidia-modeset
+    ```
+  </Step>
+  <Step title="Load nvidia-drm.ko">
+    Depends on both `nvidia.ko` and `nvidia-modeset.ko`.
+
+    ```bash
+    modprobe nvidia-drm
+    ```
+  </Step>
+  <Step title="Load nvidia-uvm.ko">
+    Can be loaded independently after `nvidia.ko`.
+
+    ```bash
+    modprobe nvidia-uvm
+    ```
+  </Step>
+</Steps>
+
+In practice, `modprobe` resolves dependencies automatically. Loading `nvidia-drm` will automatically pull in `nvidia-modeset` and `nvidia`.
+
+## Verify modules are loaded
+
+```bash
+lsmod | grep nvidia
+```
+
+Expected output with all four modules loaded:
+
+```
+nvidia_uvm           1425408  0
+nvidia_drm             73728  4
+nvidia_modeset       1257472  1 nvidia_drm
+nvidia              62652416  13 nvidia_uvm,nvidia_modeset,nvidia_drm
+```
+
+## Inspect module parameters
+
+```bash
+modinfo nvidia
+```
+
+This prints metadata including the version, license, author, and all available module parameters (prefixed `NVreg_`). To inspect a specific module:
+
+```bash
+modinfo nvidia-uvm
+modinfo nvidia-modeset
+modinfo nvidia-drm
+```

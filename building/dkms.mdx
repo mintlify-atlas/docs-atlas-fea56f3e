@@ -1,0 +1,86 @@
+---
+title: "DKMS Integration"
+description: "Use DKMS to automatically rebuild NVIDIA open kernel modules when the Linux kernel is updated."
+---
+
+**Dynamic Kernel Module Support (DKMS)** is a framework that automatically recompiles out-of-tree kernel modules whenever a new kernel version is installed. Using DKMS with the NVIDIA open GPU kernel modules means you no longer need to manually rebuild after every kernel update.
+
+<Note>
+DKMS rebuilds modules whenever a new kernel is installed, as long as the source is registered and `AUTOINSTALL="yes"` is set. This is the value used in the NVIDIA `dkms.conf`.
+</Note>
+
+## The dkms.conf File
+
+The repository ships a `dkms.conf` in `kernel-open/dkms.conf`. Its contents control how DKMS builds and installs the modules:
+
+| Field | Value | Description |
+|---|---|---|
+| `PACKAGE_NAME` | `nvidia` | The name DKMS uses to identify this module package |
+| `PACKAGE_VERSION` | `__VERSION_STRING` | Replaced at install time with the actual driver version (e.g., `595.58.03`) |
+| `AUTOINSTALL` | `yes` | Automatically rebuild and install the modules when a new kernel is detected |
+| `MAKE[0]` | See below | The command DKMS runs to build the modules |
+
+The `MAKE` command in `dkms.conf` is:
+
+```bash
+'make' -j__JOBS NV_EXCLUDE_BUILD_MODULES='__EXCLUDE_MODULES' KERNEL_UNAME=${kernelver} modules
+```
+
+- `__JOBS` is replaced by DKMS with the number of parallel jobs.
+- `__EXCLUDE_MODULES` is populated by `nvidia-installer` at runtime with any modules that should be skipped.
+- `KERNEL_UNAME=${kernelver}` tells the build system which kernel version to target.
+- The `make` command is quoted to prevent DKMS from appending `KERNELRELEASE` to the command line, which would cause the build to be misidentified as a direct Kbuild invocation.
+
+## Setting Up DKMS Manually
+
+<Steps>
+  <Step title="Copy the source to the DKMS source directory">
+    DKMS expects module sources under `/usr/src/<package-name>-<version>/`. Copy the full source tree there:
+
+    ```bash
+    sudo cp -r /path/to/open-gpu-kernel-modules /usr/src/nvidia-595.58.03
+    ```
+  </Step>
+
+  <Step title="Register the module with DKMS">
+    ```bash
+    sudo dkms add nvidia/595.58.03
+    ```
+
+    DKMS reads `dkms.conf` from the source directory to learn how to build the package.
+  </Step>
+
+  <Step title="Build the module">
+    ```bash
+    sudo dkms build nvidia/595.58.03
+    ```
+
+    This compiles the kernel modules for the currently running kernel. To build for a specific kernel version, append `--kernelver <version>`.
+  </Step>
+
+  <Step title="Install the module">
+    ```bash
+    sudo dkms install nvidia/595.58.03
+    ```
+
+    This installs the built `.ko` files into the module tree for the current kernel. On subsequent kernel updates, DKMS will repeat the build and install steps automatically.
+  </Step>
+</Steps>
+
+<Tip>
+The official NVIDIA `.run` installer can configure DKMS automatically. When you install using the installer, pass the `--dkms` flag to have it register the kernel module source with DKMS on your behalf, avoiding the manual steps above.
+</Tip>
+
+## Checking DKMS Status
+
+After registration, you can verify the DKMS state at any time:
+
+```bash
+dkms status nvidia/595.58.03
+```
+
+To remove a DKMS-managed module:
+
+```bash
+sudo dkms remove nvidia/595.58.03 --all
+```
